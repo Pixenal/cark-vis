@@ -39,6 +39,22 @@ option(
 	"Override the path to the folder containing pixenals-* libraries (set to extern by default)"
 	"extern"
 )
+
+message("FIND_ZLIB is " ${FIND_ZLIB})
+if (FIND_ZLIB)
+	message("Attempting to find zlib")
+	find_package(ZLIB REQUIRED)
+	message("--zlib include is " ${ZLIB_INCLUDE_DIRS})
+	message("Note that if the above are mismatched, there may be errors at compile time.")
+	message ("Consider disabling FIND_ZLIB and specifying manually using ZLIB_LIB and ZLIB_INCLUDE. Or using Conan.")
+	message("See github docs for more info.")
+	target_include_directories(${PROJECT} PRIVATE ${ZLIB_INCLUDE_DIRS})
+	target_link_libraries(${PROJECT} PRIVATE ${ZLIB_LIBRARIES} ${ZLIB_DEPENDENCIES})
+else()
+	target_include_directories(${PROJECT} PRIVATE ${ZLIB_INCLUDE})
+	target_link_libraries(${PROJECT} PRIVATE ${ZLIB_LIB})
+endif()
+
 message("CARK_PIX_PATH is " ${CARK_PIX_PATH})
 set(CARK_PIX_ALLOC "" ${CARK_PIX_PATH}/pixenals-alloc-utils)
 set(CARK_PIX_IO "" ${CARK_PIX_PATH}/pixenals-io-utils)
