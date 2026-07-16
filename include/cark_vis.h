@@ -15,6 +15,12 @@
 #define CARK_NAME_LEN_MAX 64
 #endif
 
+typedef struct CarkU8Arr {
+	uint8_t *pArr;
+	int64_t size;
+	int64_t count;
+} CarkU8Arr;
+
 typedef enum CarkType {
 	CARK_TYPE_NONE,
 	CARK_TYPE_I8,
@@ -63,12 +69,14 @@ typedef enum CarkGraphType {
 typedef struct CarkRef {
 	int32_t stageIdx;
 	int32_t structIdx;
-	int32_t compIdx;
+	uint32_t compIdx : 31;
+	uint32_t valid : 1;
 } CarkRef;
 
 typedef struct CarkCompInfo {
 	char name[CARK_NAME_LEN_MAX + 1];
 	CarkRef precursorArr[CARK_PRECURSOR_COUNT_MAX];
+	int32_t precursorCount;
 	CarkRef ref;
 	CarkType type;
 	CarkCompDesc desc;
@@ -103,9 +111,15 @@ typedef struct CarkStage {
 	int32_t idx;
 	int64_t bufStart;
 	int64_t bufSize;
-	int64_t bufCompressedSize;
+	int64_t bufCompressSize;
 	char name[CARK_NAME_LEN_MAX + 1];
 } CarkStage;
+
+typedef struct CarkStageArr {
+	CarkStage *pArr;
+	int32_t size;
+	int32_t count;
+} CarkStageArr;
 
 typedef struct CarkStructLog {
 	PixioByteArr data;
@@ -131,52 +145,104 @@ typedef struct CarkThread {
 	char padFooter[CARK_CACHELINE_SIZE / 2];
 } CarkThread;
 
-typedef struct CarkCtx {
+typedef struct CarkOutCtx {
 	PixalcFPtrs alloc;
 	PixioFPtrs io;
 	CarkThread *pThreadArr;
+	CarkStageArr stageArr;
 	PixalcLinAlloc compAlloc;
 	PixalcLinAlloc structAlloc;
-	PixtyU8Arr outBuf;
-	int32_t stageCount;
+	CarkU8Arr outBuf;
 	int32_t threadCount;
-} CarkCtx;
+} CarkOutCtx;
 
 typedef struct CarkGraphInitCtx {
-	CarkCtx *pCtx;
+	CarkOutCtx *pCtx;
 } CarkGraphInitCtx;
 
 typedef struct CarkLog {
-	CarkCtx *pCtx;
+	CarkOutCtx *pCtx;
 	const CarkStage *pStage;
 	int32_t structIdx;
 	int32_t thread;
 	int32_t compCount;
 } CarkLog;
 
-PixErr carkInit(
+PixErr carkOutInit(
 	const PixalcFPtrs *pAlloc,
 	const PixioFPtrs *pIo,
 	int32_t threadCount,
-	CarkCtx *pCtx
+	CarkOutCtx *pCtx
 );
-PixErr carkStageInit(
-	CarkCtx *pCtx,
+PixErr carkOutStageInit(
+	CarkOutCtx *pCtx,
 	const char *pName,
 	const CarkStructInfoArr *pStructArr,
-	CarkStage *pHandle
+	int32_t *pHandle
 );
-PixErr carkLogStart(
-	CarkCtx *pCtx,
+PixErr carkOutLogStart(
+	CarkOutCtx *pCtx,
 	int32_t thread,
 	const CarkStage *pStage,
 	int32_t structIdx,
 	int32_t idx,
 	CarkLog *pLog
 );
-PixErr carkLogComp(CarkLog *pLog, int32_t compIdx, void *pVal);
-PixErr carkLogEnd(CarkLog *pLog);
-PixErr carkStageEnd(CarkCtx *pCtx, CarkStage *pStage, bool compress);
-PixErr carkSaveToFile(CarkCtx *pCtx, const char *pPath);
-void carkStageDestroy(CarkCtx *pCtx, CarkStage *pStage);
-void carkDestroy(CarkCtx *pCtx);
+PixErr carkOutLogComp(CarkLog *pLog, int32_t compIdx, void *pVal);
+PixErr carkOutLogEnd(CarkLog *pLog);
+PixErr carkOutStageEnd(CarkOutCtx *pCtx, CarkStage *pStage, bool compress);
+PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader);
+void carkOutDestroy(CarkOutCtx *pCtx);
+
+typedef struct CarkInLoadMem {
+	CarkU8Arr bufRaw;
+	PixioByteArr buf;
+} CarkInLoadMem;
+
+typedef struct CarkInCtx {
+	PixalcFPtrs alloc;
+	PixioFPtrs io;
+	CarkInLoadMem mem;
+} CarkInCtx;
+
+typedef struct CarkCompInfoArr {
+	CarkCompInfo *pArr;
+	int32_t size;
+} CarkCompInfoArr;
+
+typedef struct CarkInStructLog {
+	PixtyRangeArr rangeArr;
+	PixtyU8Arr data;
+} CarkInStructLog;
+
+typedef struct CarkInStageLog {
+	//struct-arr is sparse, only including structs that were logged.
+	//struct-table maps absolute idx to sparse idx
+	CarkInStructLog *pStructArr;
+	int32_t *pStructTable;
+	PixtyRangeArr rangeMem;
+	PixtyU8Arr dataMem;
+} CarkInStageLog;
+
+typedef struct CarkInFile {
+	PixioFile file;
+	CarkStageArr stageArr;
+	CarkStructArr structArr;
+	CarkCompInfoArr compArr;
+	int64_t headerSize;
+} CarkInFile;
+
+PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx);
+PixErr carkInFileInit(const CarkInCtx *pCtx, CarkInFile *pFile);
+PixErr carkInFileOpen(const CarkInCtx *pCtx, const char *pPath, CarkInFile *pFile);
+PixErr carkInFileClose(const CarkInCtx *pCtx, CarkInFile *pFile);
+PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile);
+PixErr carkInFileLoadLog(
+	CarkInCtx *pCtx,
+	CarkInFile *pFile,
+	I32 stageIdx,
+	CarkInStageLog *pLog
+);
+void carkInStageLogDestroy(const CarkInCtx *pCtx, CarkInStageLog *pLog);
+void carkInFileDestroy(const CarkInCtx *pCtx, CarkInFile *pFile);
+void carkInCtxDestroy(CarkInCtx *pCtx);
