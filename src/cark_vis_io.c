@@ -1,6 +1,6 @@
 #include <zlib.h>
 
-#include <cark_vis.h>
+#include <cark_vis_io.h>
 
 typedef int8_t I8;
 typedef int32_t I32;
