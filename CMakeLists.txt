@@ -99,9 +99,9 @@ target_link_libraries(${PROJECT} PRIVATE
 target_link_libraries(${PROJECT_GUI} PRIVATE PixenalsAllocUtils PixenalsIoUtils
 	SDL3::SDL3
 )
-target_include_directories(${PROJECT_IO} PRIVATE include)
-target_include_directories(${PROJECT} PRIVATE include)
-target_include_directories(${PROJECT_GUI} PRIVATE include ${IMGUI})
+target_include_directories(${PROJECT_IO} PRIVATE include src)
+target_include_directories(${PROJECT} PRIVATE include src)
+target_include_directories(${PROJECT_GUI} PRIVATE include src ${IMGUI})
 target_include_directories(${PROJECT_IO} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
 	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include

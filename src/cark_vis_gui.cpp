@@ -43,7 +43,11 @@ void eventQueuePush(CarkGuiEventQueue *pQueue, CarkGuiEvent event) {
 	++pQueue->count;
 }
 
-PixErr carkGuiLayout(PixtyV2_I32 windowSize, CarkGuiEventQueue *pQueue) {
+PixErr carkGuiLayout(
+	Session *pSession,
+	PixtyV2_I32 windowSize,
+	CarkGuiEventQueue *pQueue
+) {
 	PixErr err = PIX_ERR_SUCCESS;
 	ImGui_ImplOpenGL3_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
@@ -80,7 +84,20 @@ PixErr carkGuiLayout(PixtyV2_I32 windowSize, CarkGuiEventQueue *pQueue) {
 		ImGui::PushItemWidth(
 			-(labelWidthBase < labelWidthMax ? labelWidthBase : labelWidthMax)
 		);
-		ImGui::Text("test text");
+		if (pSession->info.pStageArr) {
+			for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
+				const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
+				ImGui::Text("%s", pStage->name);
+				for (I32 j = 0; j < pStage->structCount; ++j) {
+					const CarkStructInfo *pStruct = &pStage->pStructArr[j].info;
+					ImGui::Text("  %s", pStruct->name);
+					for (I32 k = 0; k < pStruct->compCount; ++k) {
+						const CarkCompInfo *pComp = pStruct->pCompArr + k;
+						ImGui::Text("    %s", pComp->name);
+					}
+				}
+			}
+		}
 		ImGui::Spacing();
 	}
 	ImGui::End();

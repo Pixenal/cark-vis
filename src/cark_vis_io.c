@@ -3,6 +3,7 @@
 #include <cark_vis_io.h>
 
 typedef int8_t I8;
+typedef int16_t I16;
 typedef int32_t I32;
 typedef uint32_t U32;
 typedef int64_t I64;
@@ -27,7 +28,7 @@ typedef enum FileSizeIdx {
 	FILE_STRUCT_COMP_COUNT,
 	FILE_COMP_DESC,
 	FILE_COMP_TYPE,
-	FILE_COMP_REF_VALID,
+	FILE_COMP_REF_COUNT,
 	FILE_COMP_PRECURSOR_COUNT,
 	FILE_REF_STAGE_IDX,
 	FILE_REF_STRUCT_IDX,
@@ -48,7 +49,7 @@ static I8 fileSizeTable[FILE_ENUM_COUNT] = {0};
 
 #define BITLEN(a) (fileSizeTable[FILE_##a])
 
-static const char *carkFormat = "Cark-Vis File";
+static const char carkFormat[] = "Cark-Vis File";
 #define CARK_TOP_HEADER_SIZE (sizeof(carkFormat) + BITLEN(VERSION) / 8)
 
 static const I8 typeSizeArr[] = {
@@ -65,17 +66,8 @@ static const I8 typeSizeArr[] = {
 	64
 };
 
-PixErr carkOutInit(
-	const PixalcFPtrs *pAlloc,
-	const PixioFPtrs *pIo,
-	I32 threadCount,
-	CarkOutCtx *pCtx
-) {
-	PixErr err = PIX_ERR_SUCCESS;
-	PIX_ERR_ASSERT(
-		"",
-		sizeof(typeSizeArr) / sizeof(typeSizeArr[0]) == CARK_TYPE_ENUM_COUNT
-	);
+static
+void fileTypeSizeInit() {
 	fileSizeTable[FILE_VERSION] = 16;
 	fileSizeTable[FILE_HEADER_SIZE] = 32;
 	fileSizeTable[FILE_HEADER_SIZE_RAW] = 32;
@@ -90,7 +82,7 @@ PixErr carkOutInit(
 	fileSizeTable[FILE_STRUCT_COMP_COUNT] = 16;
 	fileSizeTable[FILE_COMP_DESC] = 8;
 	fileSizeTable[FILE_COMP_TYPE] = 8;
-	fileSizeTable[FILE_COMP_REF_VALID] = 1;
+	fileSizeTable[FILE_COMP_REF_COUNT] = 8;
 	fileSizeTable[FILE_COMP_PRECURSOR_COUNT] = 8;
 	fileSizeTable[FILE_REF_STAGE_IDX] = 16;
 	fileSizeTable[FILE_REF_STRUCT_IDX] = 16;
@@ -104,6 +96,20 @@ PixErr carkOutInit(
 	fileSizeTable[FILE_LOG_RANGE_STARTEND] = 32;
 	fileSizeTable[FILE_LOG_IDX] = 32;
 	fileSizeTable[FILE_LOG_TIMESTAMP] = 32;
+}
+
+PixErr carkOutInit(
+	const PixalcFPtrs *pAlloc,
+	const PixioFPtrs *pIo,
+	I32 threadCount,
+	CarkOutCtx *pCtx
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_ASSERT(
+		"",
+		sizeof(typeSizeArr) / sizeof(typeSizeArr[0]) == CARK_TYPE_ENUM_COUNT
+	);
+	fileTypeSizeInit();
 
 	*pCtx = (CarkOutCtx) {
 		.alloc = *pAlloc,
@@ -111,6 +117,9 @@ PixErr carkOutInit(
 		.threadCount = threadCount,
 		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread))
 	};
+	for (I32 i = 0; i < pCtx->threadCount; ++i) {
+		pCtx->pThreadArr[i].activeLogStage = -1;
+	}
 	pixalcLinAllocInit(pAlloc, &pCtx->compAlloc, sizeof(CarkCompInfo), 8, false);
 	pixalcLinAllocInit(pAlloc, &pCtx->structAlloc, sizeof(CarkStruct), 4, false);
 	return err;
@@ -182,23 +191,22 @@ PixErr carkOutStageInit(
 			CarkStageLog,
 			&pCtx->alloc,
 			&pCtx->pThreadArr[i].stageArr,
-			pCtx->stageArr.count ? pCtx->stageArr.count + 1 : 4
+			*pHandle ? *pHandle : 4
 		);
-		CarkStageLog *pStageLog = pCtx->pThreadArr[i].stageArr.pArr + pCtx->stageArr.count;
+		CarkStageLog *pStageLog = pCtx->pThreadArr[i].stageArr.pArr + *pHandle;
 		*pStageLog = (CarkStageLog) {
-			.stage = pCtx->stageArr.count,
+			.stage = *pHandle,
 			.structCount = pStructArr->size,
 			.pStructArr = (CarkStructLog *)(pStage->pStructMem + structArrByteSize * i)
 		};
 	}
-	++pCtx->stageArr.count;
 	return err;
 }
 
 PixErr carkOutLogStart(
 	CarkOutCtx *pCtx,
 	I32 thread,
-	const CarkStage *pStage,
+	I32 stageIdx,
 	I32 structIdx,
 	I32 idx,
 	CarkLog *pLog
@@ -206,7 +214,7 @@ PixErr carkOutLogStart(
 	PixErr err = PIX_ERR_SUCCESS;
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
-		pStage->idx >= 0 && pStage->idx < pCtx->stageArr.count,
+		stageIdx >= 0 && stageIdx < pCtx->stageArr.count,
 		"invalid stage"
 	);
 	PIX_ERR_RETURN_IFNOT_COND(
@@ -221,6 +229,7 @@ PixErr carkOutLogStart(
 		"logging already active for this thead, was log-end called?"
 	);
 	PIX_ERR_ASSERT("invalid state", pThread->activeLogStage == -1);
+	const CarkStage *pStage = pCtx->stageArr.pArr + stageIdx;
 	pThread->activeLog = true;
 	pThread->activeLogStage = pStage->idx;
 	*pLog = (CarkLog){
@@ -380,7 +389,7 @@ Compare structIdxCmp(const void *pData, I32 aIdx, I32 bIdx) {
 	I32 structIdx = pSortCtx->structIdx;
 	I32 a = *(I32 *)structDataGet(pSortCtx->pCtx, pSortCtx->pStage, structIdx, aIdx);
 	I32 b = *(I32 *)structDataGet(pSortCtx->pCtx, pSortCtx->pStage, structIdx, bIdx);
-	return b >= a ? STUC_COMPARE_GREAT : STUC_COMPARE_LESS;
+	return a >= b ? STUC_COMPARE_GREAT : STUC_COMPARE_LESS;
 }
 
 static
@@ -426,15 +435,15 @@ PixErr compileStructLogs(
 	I32 idxPrev = pRange->start;
 	I32 idx = 0;
 	for (I32 i = 1; i < count; idxPrev = idx, ++i) {
-		idx = *(I32 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[0]);
-		if (idx == pRange->start + 1) {
+		idx = *(I32 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[i]);
+		if (idx == idxPrev + 1) {
 			continue;
 		}
-		pRange->end = idxPrev;
+		pRange->end = idxPrev + 1;
 		PixtyRange *pRange = newRangeGet(pCtx, pRangeBuf);
 		pRange->start = idx;
 	}
-	pRange->end = idxPrev;
+	pRange->end = idxPrev + 1;
 
 	I32 structIdxBytes = BITLEN(LOG_IDX) / 8;
 	I32 byteSize = structByteSize(pStage->pStructArr + structIdx, false);
@@ -576,8 +585,10 @@ PixErr bufInflate(
 	return err;
 }
 
-PixErr carkOutStageEnd(CarkOutCtx *pCtx, CarkStage *pStage, bool compress) {
+PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_RETURN_IFNOT_COND(err, stageIdx >= 0 && stageIdx < pCtx->stageArr.count, "");
+	CarkStage *pStage = pCtx->stageArr.pArr + stageIdx;
 	PixioByteArr stageData = {0};
 	PixtyRangeArr rangeBuf = {0};//TODO move mem into out-ctx for reuse?
 	I32 rangeTotal = 0;
@@ -655,7 +666,7 @@ static
 void encodeCompRef(const CarkOutCtx *pCtx, const CarkRef *pRef, PixioByteArr *pHeader) {
 	pixioByteArrWrite(&pCtx->alloc, pHeader, &pRef->stageIdx, BITLEN(REF_STAGE_IDX));
 	pixioByteArrWrite(&pCtx->alloc, pHeader, &pRef->structIdx, BITLEN(REF_STRUCT_IDX));
-	pixioByteArrWrite(&pCtx->alloc, pHeader, &(I32){pRef->compIdx}, BITLEN(REF_COMP_IDX));
+	pixioByteArrWrite(&pCtx->alloc, pHeader, &pRef->compIdx, BITLEN(REF_COMP_IDX));
 }
 
 static
@@ -672,14 +683,13 @@ PixErr encodeCompArr(
 		pixioByteArrWriteStr(pAlloc, pHeader, pCompInfo->name);
 		pixioByteArrWrite(pAlloc, pHeader, &pCompInfo->desc, BITLEN(COMP_DESC));
 		pixioByteArrWrite(pAlloc, pHeader, &pCompInfo->type, BITLEN(COMP_TYPE));
-		bool refValid = pCompInfo->ref.valid;
-		pixioByteArrWrite(pAlloc, pHeader, &refValid, BITLEN(COMP_REF_VALID));
-		if (refValid) {
-			encodeCompRef(pCtx, &pCompInfo->ref, pHeader);
+		pixioByteArrWrite(pAlloc, pHeader, &pCompInfo->refCount, BITLEN(COMP_REF_COUNT));
+		for (I32 j = 0; j < pCompInfo->refCount; ++j) {
+			encodeCompRef(pCtx, pCompInfo->refArr + j, pHeader);
 		}
 		I32 precursorCount = pCompInfo->precursorCount;
 		pixioByteArrWrite(pAlloc, pHeader, &precursorCount, BITLEN(COMP_PRECURSOR_COUNT));
-		for (I32 j = 0; j < pCompInfo->precursorCount; ++j) {
+		for (I32 j = 0; j < precursorCount; ++j) {
 			encodeCompRef(pCtx, pCompInfo->precursorArr + j, pHeader);
 		}
 	}
@@ -784,12 +794,21 @@ PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader)
 
 static
 void stageLogDestroy(CarkOutCtx *pCtx, CarkStageLog *pStageLog) {
-	for (I32 i = 0; i < pStageLog->structCount; i) {
+	for (I32 i = 0; i < pStageLog->structCount; ++i) {
 		CarkStructLog *pStructLog = pStageLog->pStructArr + i;
 		if (pStructLog->count) {
 			byteArrDestroy(pCtx, &pStructLog->data);
 		}
 	}
+}
+
+void carkOutClear(CarkOutCtx *pCtx) {
+	for (I32 i = 0; i < pCtx->threadCount; ++i) {
+		for (I32 j = 0; j < pCtx->stageArr.count; ++j) {
+			stageLogDestroy(pCtx, pCtx->pThreadArr[i].stageArr.pArr + j);
+		}
+	}
+	pCtx->outBuf.count = 0;
 }
 
 void carkOutDestroy(CarkOutCtx *pCtx) {
@@ -822,7 +841,36 @@ void carkOutDestroy(CarkOutCtx *pCtx) {
 
 PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
-	*pCtx = (CarkInCtx){.alloc = *pAlloc, .io = *pIo};
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		!pAlloc ||
+		(pAlloc->fpMalloc && pAlloc->fpCalloc && pAlloc->fpFree && pAlloc->fpRealloc),
+		"one or more alloc func ptrs are null"
+	);
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		!pIo ||
+		(pIo->fpOpen && pIo->fpRead && pIo->fpWrite && pIo->fpPosSet && pIo->fpClose),
+		"one or more io func ptrs are null"
+	);
+	fileTypeSizeInit();
+	PixalcFPtrs allocDefault = {
+		.fpMalloc = malloc,
+		.fpCalloc = calloc,
+		.fpFree = free,
+		.fpRealloc = realloc
+	};
+	PixioFPtrs ioDefault = {
+		.fpOpen = pixioFileOpen,
+		.fpWrite = pixioFileWrite,
+		.fpRead = pixioFileRead,
+		.fpPosSet = pixioFilePosSet,
+		.fpClose = pixioFileClose
+	};
+	*pCtx = (CarkInCtx){
+		.alloc = pAlloc ? *pAlloc : allocDefault,
+		.io = pIo ? *pIo : ioDefault
+	};
 	return err;
 }
 
@@ -840,11 +888,9 @@ void decodeComp(PixioByteArr *pBuf, CarkCompInfo *pComp) {
 	pixioByteArrReadStr(pBuf, pComp->name, CARK_NAME_LEN_MAX);
 	pixioByteArrRead(pBuf, &pComp->desc, BITLEN(COMP_DESC));
 	pixioByteArrRead(pBuf, &pComp->type, BITLEN(COMP_TYPE));
-	bool refValid = false;
-	pixioByteArrRead(pBuf, &refValid, BITLEN(COMP_REF_VALID));
-	pComp->ref.valid = refValid;
-	if (refValid) {
-		decodeCompRef(pBuf, &pComp->ref);
+	pixioByteArrRead(pBuf, &pComp->refCount, BITLEN(COMP_REF_COUNT));
+	for (I32 i = 0; i < pComp->refCount; ++i) {
+		decodeCompRef(pBuf, pComp->refArr + i);
 	}
 	pixioByteArrRead(pBuf, &pComp->precursorCount, BITLEN(COMP_PRECURSOR_COUNT));
 	for (I32 i = 0; i < pComp->precursorCount; ++i) {
@@ -857,6 +903,7 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PixioByteArr *pBuf = &pCtx->mem.buf;
 	pixioByteArrRead(pBuf, &pFile->stageArr.size, BITLEN(STAGE_COUNT));
+	pFile->stageArr.count = pFile->stageArr.size;
 	pixioByteArrRead(pBuf, &pFile->structArr.size, BITLEN(STRUCT_COUNT));
 	pixioByteArrRead(pBuf, &pFile->compArr.size, BITLEN(COMP_COUNT));
 	if (!pFile->stageArr.size || !pFile->structArr.size || !pFile->compArr.size) {
@@ -883,7 +930,7 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 			CarkStructInfo *pStruct = &pStage->pStructArr[j].info;
 			pixioByteArrReadStr(pBuf, pStruct->name, CARK_NAME_LEN_MAX);
 			pixioByteArrRead(pBuf, &pStruct->desc, BITLEN(STRUCT_DESC));
-			pixioByteArrRead(pBuf, &pStruct->compCount, BITLEN(STRUCT_DESC));
+			pixioByteArrRead(pBuf, &pStruct->compCount, BITLEN(STRUCT_COMP_COUNT));
 			pStruct->pCompArr = pFile->compArr.pArr + compTotal;
 			compTotal += pStruct->compCount;
 			PIX_ERR_RETURN_IFNOT_COND(err, compTotal <= pFile->compArr.size, "");
@@ -896,7 +943,7 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 }
 
 static
-PixErr decodeHeader(CarkInCtx *pCtx, I64 sizeRaw, CarkInFile *pFile) {
+PixErr decodeHeader(CarkInCtx *pCtx, I64 size, CarkInFile *pFile) {
 	PixErr err = PIX_ERR_SUCCESS;
 	CarkInLoadMem *pMem = &pCtx->mem;
 	
@@ -904,7 +951,7 @@ PixErr decodeHeader(CarkInCtx *pCtx, I64 sizeRaw, CarkInFile *pFile) {
 	bufInflate(
 		pCtx,
 		&pMem->buf,
-		sizeRaw,
+		size,
 		outByteArrResize,
 		pMem->bufRaw.pArr,
 		pMem->bufRaw.count,
@@ -943,7 +990,11 @@ PixErr carkInFileClose(const CarkInCtx *pCtx, CarkInFile *pFile) {
 	return err;
 }
 
-PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile) {
+bool carkInFileIsOpen(const CarkInFile *pFile) {
+	return pFile->file.pFile;
+}
+
+PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile, CarkInFileInfo *pInfo) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PIX_ERR_RETURN_IFNOT_COND(err, pFile->file.pFile, "");
 	CarkInLoadMem *pMem = &pCtx->mem;
@@ -953,7 +1004,7 @@ PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile) {
 	err = pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, pMem->bufRaw.size);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 	bool validVersion =
-		*(I32 *)(pMem->bufRaw.pArr + sizeof(carkFormat)) == CARK_FILE_VERSION;
+		*(I16 *)(pMem->bufRaw.pArr + sizeof(carkFormat)) == CARK_FILE_VERSION;
 	bool validFormat = !strncmp((char *)pMem->bufRaw.pArr, carkFormat, sizeof(carkFormat));
 	PIX_ERR_THROW_IFNOT_COND(err, validFormat && validVersion, "", 0);
 	I64 headerSize = 0;
@@ -967,11 +1018,11 @@ PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile) {
 		"read failed or header size is invalid",
 		0
 	);
-	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pMem->bufRaw, headerSize);
-	pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, headerSize);
+	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pMem->bufRaw, headerSizeRaw);
+	pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, headerSizeRaw);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	pMem->bufRaw.count = headerSize;
-	err = decodeHeader(pCtx, headerSizeRaw, pFile);
+	pMem->bufRaw.count = headerSizeRaw;
+	err = decodeHeader(pCtx, headerSize, pFile);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 	PIX_ERR_THROW_IFNOT_COND(
 		err,
@@ -979,9 +1030,26 @@ PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile) {
 		"log is empty or corrupt",
 		0
 	);
-	PIX_ERR_CATCH(0, err,
-		carkInFileDestroy(pCtx, pFile);
+	pFile->headerSize = headerSizeRaw;
+	if (pInfo) {
+		*pInfo = (CarkInFileInfo){.pStageArr = &pFile->stageArr};
+	}
+	PIX_ERR_CATCH(0, err, ;);
+	return err;
+}
+
+PixErr carkInFileInfoGet(
+	const CarkInCtx *pCtx,
+	const CarkInFile *pFile,
+	CarkInFileInfo *pInfo
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		pFile && pFile->headerSize,
+		"invalid log file. was fileLoadInfo called before this?"
 	);
+	*pInfo = (CarkInFileInfo){.pStageArr = &pFile->stageArr};
 	return err;
 }
 
@@ -1113,15 +1181,15 @@ void carkInStageLogDestroy(const CarkInCtx *pCtx, CarkInStageLog *pLog) {
 	*pLog = (CarkInStageLog){0};
 }
 
-void carkInFileDestroy(const CarkInCtx *pCtx, CarkInFile *pFile) {
+void carkInFileDestroy(const PixalcFPtrs *pAlloc, CarkInFile *pFile) {
 	if (pFile->stageArr.pArr) {
-		pCtx->alloc.fpFree(pFile->stageArr.pArr);
+		pAlloc->fpFree(pFile->stageArr.pArr);
 	}
 	if (pFile->structArr.pArr) {
-		pCtx->alloc.fpFree(pFile->structArr.pArr);
+		pAlloc->fpFree(pFile->structArr.pArr);
 	}
 	if (pFile->compArr.pArr) {
-		pCtx->alloc.fpFree(pFile->compArr.pArr);
+		pAlloc->fpFree(pFile->compArr.pArr);
 	}
 	*pFile = (CarkInFile){0};
 }

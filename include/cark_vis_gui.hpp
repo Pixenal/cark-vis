@@ -3,6 +3,8 @@
 #include <pixenals_error_utils.h>
 #include <pixenals_types.h>
 
+#include <common.h>
+
 #ifndef CARK_GUI_EVENT_QUEUE_MAX
 #define CARK_GUI_EVENT_QUEUE_MAX 64
 #endif
@@ -28,7 +30,11 @@ extern "C" {
 #endif
 PixErr carkGuiInit(void *pWindow, void *pSdlGlCtx);
 PixErr carkGuiEvent(const void *pEvent);
-PixErr carkGuiLayout(PixtyV2_I32 windowSize, CarkGuiEventQueue *pQueue);
+PixErr carkGuiLayout(
+	Session *pSession,
+	PixtyV2_I32 windowSize,
+	CarkGuiEventQueue *pQueue
+);
 PixErr carkGuiDraw();
 void carkGuiDestroy();
 #ifdef __cplusplus

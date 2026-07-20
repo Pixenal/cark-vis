@@ -6,7 +6,6 @@
 #include <pixenals_types.h>
 
 #include <cark_vis_gui.hpp>
-#include <cark_vis_io.h>
 
 #define CARK_PATH_LEN_MAX 4096
 
@@ -48,14 +47,12 @@ typedef struct GlCtx {
 	GLint vertPosLocation;
 } GlCtx;
 
-typedef struct Session {
-	int i;
-} Session;
-
-typedef struct State {
-	Session session;
-	CarkGuiState gui;
-} State;
+static PixalcFPtrs alloc = {
+	.fpMalloc = malloc,
+	.fpCalloc = calloc,
+	.fpFree = free,
+	.fpRealloc = realloc
+};
 
 static
 void shaderLogPrint(GLuint shader) {
@@ -227,15 +224,15 @@ void fileOpenCallback(void *pUserData, const char *const *ppPathArr, I32 filter)
 }
 
 static
-PixErr guiEventHandle(SDL_Window *pWindow, State *pState, CarkGuiEvent event) {
+PixErr guiEventHandle(SDL_Window *pWindow, CarkGuiState *pGui, CarkGuiEvent event) {
 	PixErr err = PIX_ERR_SUCCESS;
 	switch (event) {
 		case CARK_GUI_EVENT_FILE_OPEN:
-			if (!pState->gui.fileDialogActive && !pState->gui.pFileDialogPath) {
-				pState->gui.fileDialogActive = true;
+			if (!pGui->fileDialogActive && !pGui->pFileDialogPath) {
+				pGui->fileDialogActive = true;
 				SDL_ShowOpenFileDialog(
 					fileOpenCallback,
-					&pState->gui,
+					pGui,
 					pWindow,
 					NULL,
 					0,
@@ -253,14 +250,79 @@ PixErr guiEventHandle(SDL_Window *pWindow, State *pState, CarkGuiEvent event) {
 }
 
 static
-PixErr update(State *pState) {
+void sessionClear(Session *pSession) {
+	carkInFileDestroy(&alloc, &pSession->file);
+	pSession->info = (CarkInFileInfo){0};
+}
+
+static
+void sessionDestroy(Session *pSession) {
+	sessionClear(pSession);
+	if (pSession->logArr.pArr) {
+		free(pSession->logArr.pArr);
+	}
+	*pSession = (Session){0};
+}
+
+static
+PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
+	PixErr err = PIX_ERR_SUCCESS;
+	printf("opening log file %s\n", pGui->pFileDialogPath);
+	
+	sessionClear(pSession);
+	CarkInCtx carkCtx = {0};
+	err = carkInInit(NULL, NULL, &carkCtx);
+	PIX_ERR_THROW_IFNOT(err, "", 1);
+	err = carkInFileInit(&carkCtx, &pSession->file);
+	PIX_ERR_THROW_IFNOT(err, "", 1);
+	err = carkInFileOpen(&carkCtx, pGui->pFileDialogPath, &pSession->file);
+	PIX_ERR_THROW_IFNOT(err, "", 1);
+	err = carkInFileLoadInfo(&carkCtx, &pSession->file, &pSession->info);
+	PIX_ERR_THROW_IFNOT(err, "", 1);
+	/*
+	TODO
+	PIXALC_DYN_ARR_RESIZE(
+		CarkInStageLog,
+		&alloc,
+		&pSession->logArr,
+		info.pStageArr->count
+	);
+	for (I32 i = 0; i < info.pStageArr->count; ++i) {
+		err = carkInFileLoadLog(
+			&carkCtx,
+			&pSession->file,
+			i,
+			pSession->logArr.pArr + i
+		);
+		PIX_ERR_THROW_IFNOT(err, "", 1);
+	}
+	*/
+	PIX_ERR_CATCH(1, err, ;);
+	if (carkInFileIsOpen(&pSession->file)) {
+		PixErr closeErr = carkInFileClose(&carkCtx, &pSession->file);
+		err = err == PIX_ERR_SUCCESS ? closeErr : err;
+	}
+	carkInCtxDestroy(&carkCtx);
+	free(pGui->pFileDialogPath);
+	pGui->pFileDialogPath = NULL;
+	PIX_ERR_THROW_IFNOT(err, "", 0);
+	PIX_ERR_CATCH(0, err,
+		sessionClear(pSession);
+	);
+	return err;
+}
+
+static
+PixErr update(CarkGuiState *pGui, Session *pSession) {
 	PixErr err = PIX_ERR_SUCCESS;
 	//TODO..
 
-	if (!pState->gui.fileDialogActive && pState->gui.pFileDialogPath) {
-		printf("opening log file %s\n", pState->gui.pFileDialogPath);
-		free(pState->gui.pFileDialogPath);
-		pState->gui.pFileDialogPath = NULL;
+	if (!pGui->fileDialogActive && pGui->pFileDialogPath) {
+		err = openNewSession(pGui, pSession);
+		if (err != PIX_ERR_SUCCESS) {
+			printf("failed to open log file\n");
+			err = PIX_ERR_SUCCESS;
+		}
 	}
 	return err;
 }
@@ -269,7 +331,8 @@ static
 PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
 
-	State state = {0};
+	Session session = {0};
+	CarkGuiState gui = {0};
 	do {
 		PixtyV2_I32 windowSize = {0};
 		SDL_GetWindowSize(pWindow, windowSize.d, windowSize.d + 1);
@@ -284,14 +347,14 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		}
 
 		CarkGuiEventQueue guiQueue = {0};
-		err = carkGuiLayout(windowSize, &guiQueue);
+		err = carkGuiLayout(&session, windowSize, &guiQueue);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		for (I32 i = 0; i < guiQueue.count; ++i) {
-			err = guiEventHandle(pWindow, &state, guiQueue.queue[i]);
+			err = guiEventHandle(pWindow, &gui, guiQueue.queue[i]);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 		}
 
-		err = update(&state);
+		err = update(&gui, &session);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 
 		err = draw(pWindow, pGlCtx);
@@ -300,11 +363,11 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	} while(true);
 
 	PIX_ERR_CATCH(0, err, ;);
-	while (state.gui.fileDialogActive) {
+	while (gui.fileDialogActive) {
 		SDL_Delay(1);
 	}
-	if (state.gui.pFileDialogPath) {
-		free(state.gui.pFileDialogPath);
+	if (gui.pFileDialogPath) {
+		free(gui.pFileDialogPath);
 	}
 	return err;
 }

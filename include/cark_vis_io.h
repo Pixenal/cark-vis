@@ -1,12 +1,19 @@
 #pragma once
 
+#ifdef __cplusplus
+#include <cstdint>
+#else
 #include <stdint.h>
+#endif
 
 #include <pixenals_alloc_utils.h>
 #include <pixenals_io_utils.h>
 
 #ifndef CARK_PRECURSOR_COUNT_MAX
 #define CARK_PRECURSOR_COUNT_MAX 4
+#endif
+#ifndef CARK_REF_COUNT_MAX
+#define CARK_REF_COUNT_MAX 4
 #endif
 #ifndef CARK_CACHELINE_SIZE
 #define CARK_CACHELINE_SIZE 64//using a static estimate for now
@@ -57,6 +64,7 @@ typedef enum CarkCompDesc {
 	CARK_COMP_DESC_VEC_Z,
 	CARK_COMP_DESC_VEC_W,
 	CARK_COMP_DESC_STR,
+	CARK_COMP_DESC_ID,
 	CARK_COMP_DESC_ENUM_COUNT
 } CarkCompDesc;
 
@@ -66,18 +74,20 @@ typedef enum CarkGraphType {
 	CARK_GRAPH_ENUM_COUNT
 } CarkGraphType;
 
+//a stage-idx of -1 indicates the current stage 
+//a comp-idx of -1 indicates the whole struct (all components)
 typedef struct CarkRef {
 	int32_t stageIdx;
 	int32_t structIdx;
-	uint32_t compIdx : 31;
-	uint32_t valid : 1;
+	int32_t compIdx;
 } CarkRef;
 
 typedef struct CarkCompInfo {
 	char name[CARK_NAME_LEN_MAX + 1];
 	CarkRef precursorArr[CARK_PRECURSOR_COUNT_MAX];
 	int32_t precursorCount;
-	CarkRef ref;
+	CarkRef refArr[CARK_PRECURSOR_COUNT_MAX];
+	int32_t refCount;
 	CarkType type;
 	CarkCompDesc desc;
 } CarkCompInfo;
@@ -180,18 +190,20 @@ PixErr carkOutStageInit(
 	const CarkStructInfoArr *pStructArr,
 	int32_t *pHandle
 );
+//TODO add single function wrapper of start-comp-end for single-comp structs
 PixErr carkOutLogStart(
 	CarkOutCtx *pCtx,
 	int32_t thread,
-	const CarkStage *pStage,
+	int32_t stageIdx,
 	int32_t structIdx,
 	int32_t idx,
 	CarkLog *pLog
 );
 PixErr carkOutLogComp(CarkLog *pLog, int32_t compIdx, void *pVal);
 PixErr carkOutLogEnd(CarkLog *pLog);
-PixErr carkOutStageEnd(CarkOutCtx *pCtx, CarkStage *pStage, bool compress);
+PixErr carkOutStageEnd(CarkOutCtx *pCtx, int32_t stageIdx, bool compress);
 PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader);
+void carkOutClear(CarkOutCtx *pCtx);
 void carkOutDestroy(CarkOutCtx *pCtx);
 
 typedef struct CarkInLoadMem {
@@ -232,11 +244,21 @@ typedef struct CarkInFile {
 	int64_t headerSize;
 } CarkInFile;
 
+typedef struct CarkInFileInfo {
+	const CarkStageArr *pStageArr;
+} CarkInFileInfo;
+
 PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx);
 PixErr carkInFileInit(const CarkInCtx *pCtx, CarkInFile *pFile);
 PixErr carkInFileOpen(const CarkInCtx *pCtx, const char *pPath, CarkInFile *pFile);
 PixErr carkInFileClose(const CarkInCtx *pCtx, CarkInFile *pFile);
-PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile);
+bool carkInFileIsOpen(const CarkInFile *pFile);
+PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile, CarkInFileInfo *pInfo);
+PixErr carkInFileInfoGet(
+	const CarkInCtx *pCtx,
+	const CarkInFile *pFile,
+	CarkInFileInfo *pInfo
+);
 PixErr carkInFileLoadLog(
 	CarkInCtx *pCtx,
 	CarkInFile *pFile,
@@ -244,5 +266,5 @@ PixErr carkInFileLoadLog(
 	CarkInStageLog *pLog
 );
 void carkInStageLogDestroy(const CarkInCtx *pCtx, CarkInStageLog *pLog);
-void carkInFileDestroy(const CarkInCtx *pCtx, CarkInFile *pFile);
+void carkInFileDestroy(const PixalcFPtrs *pAlloc, CarkInFile *pFile);
 void carkInCtxDestroy(CarkInCtx *pCtx);
