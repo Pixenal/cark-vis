@@ -80,11 +80,15 @@ endif()
 message("CARK_PIX_PATH is " ${CARK_PIX_PATH})
 set(CARK_PIX_ALLOC "" ${CARK_PIX_PATH}/pixenals-alloc-utils)
 set(CARK_PIX_IO "" ${CARK_PIX_PATH}/pixenals-io-utils)
+set(CARK_PIX_MATH "" ${CARK_PIX_PATH}/pixenals-math-utils)
 if (NOT TARGET PixenalsAllocUtils)
 	add_subdirectory(${CARK_PIX_ALLOC} ${CARK_PIX_ALLOC})
 endif()
 if (NOT TARGET PixenalsIoUtils)
 	add_subdirectory(${CARK_PIX_IO} ${CARK_PIX_IO})
+endif()
+if (NOT TARGET PixenalsMathUtils)
+	add_subdirectory(${CARK_PIX_MATH} ${CARK_PIX_MATH})
 endif()
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -93,8 +97,8 @@ add_subdirectory(extern/glew-cmake)
 find_package(OpenGL REQUIRED)
 target_link_libraries(${PROJECT_IO} PRIVATE PixenalsAllocUtils PixenalsIoUtils)
 target_link_libraries(${PROJECT} PRIVATE
-	PixenalsAllocUtils PixenalsIoUtils SDL3::SDL3 libglew_static OpenGL::GL
-	${PROJECT_IO} ${PROJECT_GUI}
+	PixenalsAllocUtils PixenalsIoUtils PixenalsMathUtils SDL3::SDL3 libglew_static
+	OpenGL::GL ${PROJECT_IO} ${PROJECT_GUI}
 )
 target_link_libraries(${PROJECT_GUI} PRIVATE PixenalsAllocUtils PixenalsIoUtils
 	SDL3::SDL3
@@ -113,5 +117,5 @@ target_include_directories(${PROJECT} PUBLIC
 )
 target_include_directories(${PROJECT_GUI} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
-	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include
+	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
 )

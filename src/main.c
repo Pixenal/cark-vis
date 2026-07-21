@@ -4,10 +4,12 @@
 #include <GL/gl.h>
 #include <pixenals_error_utils.h>
 #include <pixenals_types.h>
+#include <pixenals_math_utils.h>
 
 #include <cark_vis_gui.hpp>
 
 #define CARK_PATH_LEN_MAX 4096
+#define PI 3.1415926536f
 
 typedef int16_t I16;
 typedef int32_t I32;
@@ -46,7 +48,22 @@ typedef struct GlCtx {
 	GLuint vbo;
 	GLuint ebo;
 	GLint vertPosLocation;
+	GLuint ubo;
+	GLuint uboIdx;
+	GLuint uboBind;
 } GlCtx;
+
+typedef struct View {
+	PixtyV2_F32 pan;
+	float yaw;
+	float pitch;
+	float camDist;
+} View;
+
+typedef struct Keys {
+	bool pan;
+	bool orbit;
+} Keys;
 
 static PixalcFPtrs alloc = {
 	.fpMalloc = malloc,
@@ -76,6 +93,15 @@ void shaderLogPrint(GLuint shader) {
 	free(pLog);
 }
 
+typedef struct DrawArgs {
+	PixtyM4x4 persp;
+	PixtyM4x4 view;
+	PixtyV2_F32 pan;
+	float yaw;
+	float pitch;
+	float camDist;
+} DrawArgs;
+
 static
 PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
@@ -92,9 +118,37 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	GLuint fragShader = glCreateShader(GL_FRAGMENT_SHADER);
 	const GLchar *vertShaderSrc = "\
 		#version 410 core\n\
-		layout (location = 0) in vec2 vertPos;\
+		layout (location = 0) in vec3 vertPos;\
+		layout (std140) uniform drawArgs {\
+			mat4 persp;\
+			mat4 view;\
+			vec2 pan;\
+			float yaw;\
+			float pitch;\
+			float camDist;\
+		};\
 		void main() {\
-			gl_Position = vec4(vertPos.x, vertPos.y, .0, 1.0);\
+			float sinYaw = sin(yaw);\
+			float cosYaw = cos(yaw);\
+			float sinPitch = sin(pitch);\
+			float cosPitch = cos(pitch);\
+			mat4 yawMat = mat4(\
+				cosYaw, .0f, -sinYaw, .0f,\
+				.0f, 1.0f, .0f, .0f,\
+				sinYaw, .0f, cosYaw, .0f,\
+				.0f, .0f, .0f, 1.0f\
+			);\
+			mat4 pitchMat = mat4(\
+				1.0, .0, .0, .0f,\
+				.0, cosPitch, sinPitch, .0f,\
+				.0, -sinPitch, cosPitch, .0f,\
+				.0f, .0f, .0f, 1.0f\
+			);\
+			mat4 rot = pitchMat * yawMat;\
+			vec4 pos = rot * vec4(vertPos, 1.0f);\
+			pos.xyz += vec3(.0f, .0f, -1.0f) * camDist;\
+			pos.xy += pan;\
+			gl_Position = persp * pos;\
 		}\
 	";
 	const GLchar *fragShaderSrc = "\
@@ -143,13 +197,22 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	PIX_ERR_RETURN_IFNOT_COND(err, glErr, "gl link failed");
 
 	GLfloat posArr[] = {
-		-.5f, -.5f,
-		.5f, -.5f,
-		.5f, .5f,
-		-.5f, .5f
+		-.5f, -.5f, -.5f,
+		.5f, -.5f, -.5f,
+		.5f, -.5f, .5f,
+		-.5f, -.5f, .5f,
+		-.5f, .5f, -.5f,
+		.5f, .5f, -.5f,
+		.5f, .5f, .5f, 
+		-.5f, .5f, .5f
 	};
 	GLuint cornerArr[] = {
-		0, 1, 2, 2, 3, 0
+		0, 1, 2, 2, 3, 0,
+		0, 1, 5, 5, 4, 0,
+		1, 2, 6, 6, 5, 1,
+		2, 3, 7, 7, 6, 2,
+		3, 0, 4, 4, 7, 3,
+		4, 5, 6, 6, 7, 2
 	};
 
 	glGenVertexArrays(1, &pGlCtx->vao);
@@ -160,21 +223,88 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	glBufferData(GL_ARRAY_BUFFER, sizeof(posArr), posArr, GL_STATIC_DRAW);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pGlCtx->ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cornerArr), cornerArr, GL_STATIC_DRAW);
-	I32 vec2Size = 2 * sizeof(GL_FLOAT);
-	glVertexAttribPointer(pGlCtx->vertPosLocation, 2, GL_FLOAT, false, vec2Size, NULL);
+	I32 vec3Size = 3 * sizeof(GL_FLOAT);
+	glVertexAttribPointer(pGlCtx->vertPosLocation, 3, GL_FLOAT, false, vec3Size, NULL);
 	glEnableVertexAttribArray(pGlCtx->vertPosLocation);
+
+	glGenBuffers(1, &pGlCtx->ubo);
+	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
+	glBufferData(GL_UNIFORM_BUFFER, sizeof(DrawArgs), NULL, GL_STATIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	pGlCtx->uboBind = 0;
+	glBindBufferBase(GL_UNIFORM_BUFFER, pGlCtx->uboBind, pGlCtx->ubo);
+	pGlCtx->uboIdx = glGetUniformBlockIndex(pGlCtx->prog, "drawArgs");
+	glUniformBlockBinding(pGlCtx->prog, pGlCtx->uboIdx, pGlCtx->uboBind);
 
 	return err;
 }
 
 static
-PixErr draw(SDL_Window *pWindow, GlCtx *pGlCtx) {
+PixtyM4x4 frustum(
+	float left,
+	float right,
+	float bottom,
+	float top,
+	float zNear,
+	float zFar
+) {
+	float a = (right + left) / (right - left);
+	float b = (top + bottom) / (top - bottom);
+	float c = -(zFar + zNear) / (zFar - zNear);
+	float d = -(2.0f * zFar * zNear) / (zFar - zNear);
+	return (PixtyM4x4) {
+		2.0f * zNear / (right - left), .0f, .0f, .0f,
+		.0f, 2.0f * zNear / (top - bottom), .0f, .0f,
+		a, b, c, -1.0f,
+		.0f, .0f, d, .0f
+	};
+}
+
+static
+PixtyM4x4 perspective(double yFov, double aspect, double zNear, double zFar) {
+	float f = 1.0f / tanf(yFov / 2.0f);
+	return (PixtyM4x4) {
+		f / aspect, .0f, .0f, .0f,
+		.0f, f, .0f, .0f,
+		.0f, .0f, (zNear + zFar) / (zNear - zFar), -1.0f,
+		.0f, .0f, (2.0f * zNear * zFar) / (zNear - zFar), .0f
+	};
+}
+
+static
+PixErr draw(
+	SDL_Window *pWindow,
+	GlCtx *pGlCtx,
+	const View *pView,
+	PixtyV2_I32 windowSize
+) {
 	PixErr err = PIX_ERR_SUCCESS;
 	glClearColor(.2f, .2f, .2f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glUseProgram(pGlCtx->prog);
+
+	float aspect = (F32)windowSize.d[0] / (F32)windowSize.d[1];
+	float zNear = .001f;
+	float zFar = 100.0f;
+	DrawArgs drawArgs = {
+		.persp = perspective(PI / 4.0f, aspect, zNear, zFar),
+		.view = {
+			1.0f, .0f, .0f, .0f,
+			.0f, 1.0f, .0f, 0.0f,
+			.0f, .0f, 1.0f, 0.0f,
+			.0f, .0f, 0.0f, 1.0f
+		},
+		.pan = pView->pan,
+		.yaw = pView->yaw,
+		.pitch = pView->pitch,
+		.camDist = pView->camDist
+	};
+	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DrawArgs), &drawArgs);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
 	glBindVertexArray(pGlCtx->vao);
-	glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, NULL);
+	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, NULL);
 	err = carkGuiDraw();
 	PIX_ERR_RETURN_IFNOT(err, "");
 
@@ -186,9 +316,12 @@ static
 PixErr eventHandle(
 	PixtyV2_I32 windowSize,
 	SDL_Event *pEvent,
-	bool *pExit
+	bool *pExit,
+	View *pView,
+	Keys *pKeys
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
+	PixtyV2_F32 fWindowSize = {(F32)windowSize.d[0], (F32)windowSize.d[1]};
 	switch (pEvent->type) {
 		case SDL_EVENT_QUIT:
 			//v fallthrough v
@@ -196,9 +329,54 @@ PixErr eventHandle(
 			*pExit = true;
 			return err;
 		case SDL_EVENT_MOUSE_MOTION:
+			if (pKeys->orbit) {
+				PixtyV2_F32 motion = {pEvent->motion.xrel, pEvent->motion.yrel};
+				if (pKeys->pan) {
+					motion = _(motion V2MULS .05f);
+					motion.d[1] *= -1.0f;
+					_(&pView->pan V2ADDEQL motion);
+				}
+				else {
+					motion = _(_(motion V2DIV fWindowSize) V2MULS 2.0f * PI);
+					float wrap = 2.0f * PI;
+					pView->yaw = fmod(pView->yaw + motion.d[0], wrap);
+					pView->pitch = fmod(pView->pitch + motion.d[1], wrap);
+				}
+			}
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			//..
+			pKeys->orbit = pEvent->button.button == SDL_BUTTON_MIDDLE;
+			break;
+		case SDL_EVENT_MOUSE_BUTTON_UP:
+			if (pEvent->button.button == SDL_BUTTON_MIDDLE) {
+				pKeys->orbit = false;
+			}
+			break;
+		case SDL_EVENT_KEY_DOWN:
+			switch (pEvent->key.key) {
+				case SDLK_LSHIFT:
+				//v fallthrough v
+				case SDLK_RSHIFT:
+					pKeys->pan = true;
+					break;
+				default:
+					;
+			}
+			break;
+		case SDL_EVENT_KEY_UP:
+			switch (pEvent->key.key) {
+				case SDLK_LSHIFT:
+				//v fallthrough v
+				case SDLK_RSHIFT:
+					pKeys->pan = false;
+					break;
+				default:
+					;
+			}
+			break;
+		case SDL_EVENT_MOUSE_WHEEL:
+			pView->camDist -= pEvent->wheel.y;
+			pView->camDist = pView->camDist >= .0f ? pView->camDist : .0f;
 			break;
 		default:
 			;
@@ -314,7 +492,7 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 }
 
 static
-PixErr update(CarkGuiState *pGui, Session *pSession) {
+PixErr update(CarkGuiState *pGui, Session *pSession, View *pView) {
 	PixErr err = PIX_ERR_SUCCESS;
 	//TODO..
 
@@ -334,13 +512,15 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 
 	Session session = {0};
 	CarkGuiState gui = {0};
+	View view = {.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 6.0f};
+	Keys keys = {0};
 	do {
 		PixtyV2_I32 windowSize = {0};
 		SDL_GetWindowSize(pWindow, windowSize.d, windowSize.d + 1);
 		SDL_Event event = {0};
 		while (SDL_PollEvent(&event)) {
 			bool exit = false;
-			err = eventHandle(windowSize, &event, &exit);
+			err = eventHandle(windowSize, &event, &exit, &view, &keys);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			if (exit) {
 				return err;
@@ -355,10 +535,10 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 		}
 
-		err = update(&gui, &session);
+		err = update(&gui, &session, &view);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 
-		err = draw(pWindow, pGlCtx);
+		err = draw(pWindow, pGlCtx, &view, windowSize);
 		PIX_ERR_THROW_IFNOT(err, "draw failed", 0);
 		SDL_Delay(1);
 	} while(true);
