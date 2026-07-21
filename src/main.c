@@ -9,6 +9,7 @@
 
 #define CARK_PATH_LEN_MAX 4096
 
+typedef int16_t I16;
 typedef int32_t I32;
 typedef float F32;
 
@@ -251,6 +252,9 @@ PixErr guiEventHandle(SDL_Window *pWindow, CarkGuiState *pGui, CarkGuiEvent even
 
 static
 void sessionClear(Session *pSession) {
+	for (I32 i = 0; i < pSession->logArr.size; ++i) {
+		carkInStageLogDestroy(&alloc, pSession->logArr.pArr + i);
+	}
 	carkInFileDestroy(&alloc, &pSession->file);
 	pSession->info = (CarkInFileInfo){0};
 }
@@ -279,15 +283,13 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	PIX_ERR_THROW_IFNOT(err, "", 1);
 	err = carkInFileLoadInfo(&carkCtx, &pSession->file, &pSession->info);
 	PIX_ERR_THROW_IFNOT(err, "", 1);
-	/*
-	TODO
 	PIXALC_DYN_ARR_RESIZE(
 		CarkInStageLog,
 		&alloc,
 		&pSession->logArr,
-		info.pStageArr->count
+		pSession->info.pStageArr->count
 	);
-	for (I32 i = 0; i < info.pStageArr->count; ++i) {
+	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
 		err = carkInFileLoadLog(
 			&carkCtx,
 			&pSession->file,
@@ -296,7 +298,6 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
 	}
-	*/
 	PIX_ERR_CATCH(1, err, ;);
 	if (carkInFileIsOpen(&pSession->file)) {
 		PixErr closeErr = carkInFileClose(&carkCtx, &pSession->file);

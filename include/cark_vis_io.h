@@ -265,6 +265,6 @@ PixErr carkInFileLoadLog(
 	I32 stageIdx,
 	CarkInStageLog *pLog
 );
-void carkInStageLogDestroy(const CarkInCtx *pCtx, CarkInStageLog *pLog);
+void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog);
 void carkInFileDestroy(const PixalcFPtrs *pAlloc, CarkInFile *pFile);
 void carkInCtxDestroy(CarkInCtx *pCtx);

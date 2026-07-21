@@ -460,7 +460,7 @@ PixErr compileStructLogs(
 			(U8 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[i]) + structIdxBytes;
 		pixioByteArrWrite(pAlloc, pStageData, pStart, byteSize * 8);
 	}
-	*pDataTotal += (I64)structIdxBytes * (I64)count;
+	*pDataTotal += (I64)byteSize * (I64)count;
 	return err;
 }
 
@@ -937,6 +937,7 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 			for (I32 k = 0; k < pStruct->compCount; ++k) {
 				decodeComp(pBuf, pStruct->pCompArr + k);
 			}
+			pStage->pStructArr[j].byteSize = structSizeGet(pStruct);
 		}
 	}
 	return err;
@@ -1090,7 +1091,7 @@ PixErr decodeLog(
 	PIXALC_DYN_ARR_RESIZE(PixtyRange, &pCtx->alloc, &pLog->rangeMem, rangeTotal);
 	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pLog->dataMem, dataTotal);
 	pLog->pStructTable = pCtx->alloc.fpCalloc(pStage->structCount, sizeof(I32));
-	for (I32 i = 0; structsLogged; ++i) {
+	for (I32 i = 0; i < structsLogged; ++i) {
 		CarkInStructLog *pStructLog = pLog->pStructArr + i;
 		I32 structIdx = 0;
 		pixioByteArrRead(&pMem->buf, &structIdx, BITLEN(LOG_STRUCT));
@@ -1102,11 +1103,12 @@ PixErr decodeLog(
 		pLog->pStructTable[structIdx] = i;
 		I32 count = 0;
 		pixioByteArrRead(&pMem->buf, &count, BITLEN(LOG_COUNT));
-		I32 structByteSize = structSizeGet(&pStage->pStructArr[structIdx].info);
-		pStructLog->data.count = count * structByteSize;
+		I32 byteSize = structByteSize(pStage->pStructArr + structIdx, false);
+		pStructLog->data.count = count * byteSize;
 		pStructLog->data.pArr = pLog->dataMem.pArr + pLog->dataMem.count;
 		pLog->dataMem.count += pStructLog->data.count;
 		pixioByteArrRead(&pMem->buf, &pStructLog->rangeArr.size, BITLEN(LOG_RANGE_COUNT));
+		pStructLog->rangeArr.count = pStructLog->rangeArr.size;
 		pStructLog->rangeArr.pArr = pLog->rangeMem.pArr + pLog->rangeMem.count;
 		pLog->rangeMem.count += pStructLog->rangeArr.count;
 		for (I32 j = 0; j < pStructLog->rangeArr.count; ++j) {
@@ -1114,7 +1116,7 @@ PixErr decodeLog(
 			pixioByteArrRead(&pMem->buf, &pRange->start, BITLEN(LOG_RANGE_STARTEND));
 			pixioByteArrRead(&pMem->buf, &pRange->end, BITLEN(LOG_RANGE_STARTEND));
 		}
-		pixioByteArrRead(&pMem->buf, pStructLog->data.pArr, pStructLog->data.count);
+		pixioByteArrRead(&pMem->buf, pStructLog->data.pArr, pStructLog->data.count * 8);
 	}
 	return err;
 }
@@ -1160,23 +1162,23 @@ PixErr carkInFileLoadLog(
 	err = loadLog(pCtx, pFile, pStage, pLog);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 	PIX_ERR_CATCH(0, err,
-		carkInStageLogDestroy(pCtx, pLog);
+		carkInStageLogDestroy(&pCtx->alloc, pLog);
 	);
 	return err;
 }
 
-void carkInStageLogDestroy(const CarkInCtx *pCtx, CarkInStageLog *pLog) {
+void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog) {
 	if (pLog->dataMem.pArr) {
-		pCtx->alloc.fpFree(pLog->dataMem.pArr);
+		pAlloc->fpFree(pLog->dataMem.pArr);
 	}
 	if (pLog->rangeMem.pArr) {
-		pCtx->alloc.fpFree(pLog->rangeMem.pArr);
+		pAlloc->fpFree(pLog->rangeMem.pArr);
 	}
 	if (pLog->pStructArr) {
-		pCtx->alloc.fpFree(pLog->pStructArr);
+		pAlloc->fpFree(pLog->pStructArr);
 	}
 	if (pLog->pStructTable) {
-		pCtx->alloc.fpFree(pLog->pStructTable);
+		pAlloc->fpFree(pLog->pStructTable);
 	}
 	*pLog = (CarkInStageLog){0};
 }
