@@ -47,7 +47,7 @@ typedef enum CarkDesc {
 	CARK_DESC_NONE,
 	CARK_DESC_MISC,
 	CARK_DESC_IDX,
-	CARK_DESC_PTR,//TODO implement this?
+	CARK_DESC_PTR,//TODO remove this
 	CARK_DESC_MESH,
 	CARK_DESC_FACE,
 	CARK_DESC_CORNER,
@@ -225,13 +225,18 @@ typedef struct CarkCompInfoArr {
 typedef struct CarkInStructLog {
 	PixtyRangeArr rangeArr;
 	PixtyU8Arr data;
+	int32_t idx;
 } CarkInStructLog;
+
+typedef struct CarkInStructLogArr {
+	CarkInStructLog *pArr;
+	int32_t size;
+	int32_t count;
+} CarkInStructLogArr;
 
 typedef struct CarkInStageLog {
 	//struct-arr is sparse, only including structs that were logged.
-	//struct-table maps absolute idx to sparse idx
-	CarkInStructLog *pStructArr;
-	int32_t *pStructTable;
+	CarkInStructLogArr structs;
 	PixtyRangeArr rangeMem;
 	PixtyU8Arr dataMem;
 } CarkInStageLog;
@@ -242,11 +247,17 @@ typedef struct CarkInFile {
 	CarkStructArr structArr;
 	CarkCompInfoArr compArr;
 	int64_t headerSize;
+	I32 stageIdx;
 } CarkInFile;
 
 typedef struct CarkInFileInfo {
 	const CarkStageArr *pStageArr;
 } CarkInFileInfo;
+
+typedef struct CarkInLogItem {
+	const U8 *pData;
+	float timestamp;
+} CarkInLogItem;
 
 PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx);
 PixErr carkInFileInit(const CarkInCtx *pCtx, CarkInFile *pFile);
@@ -258,6 +269,14 @@ PixErr carkInFileInfoGet(
 	const CarkInCtx *pCtx,
 	const CarkInFile *pFile,
 	CarkInFileInfo *pInfo
+);
+void carkInFileLogClear(CarkInStageLog *pLog);
+int32_t carkInStructLogCount(const CarkInStructLog *pLog);
+PixErr carkInLogIdx(
+	const CarkInStructLog *pLog,
+	const CarkStage *pStage,
+	int32_t itemIdx,
+	CarkInLogItem *pItem
 );
 PixErr carkInFileLoadLog(
 	CarkInCtx *pCtx,

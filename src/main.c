@@ -13,6 +13,7 @@
 
 typedef int16_t I16;
 typedef int32_t I32;
+typedef uint32_t U32;
 typedef float F32;
 
 #define SDL_ERR_RET(a)\
@@ -65,12 +66,43 @@ typedef struct Keys {
 	bool orbit;
 } Keys;
 
+typedef enum StageDataType {
+	STAGE_DATA_NONE,
+	STAGE_DATA_ARRAY,
+	STAGE_DATA_MESH,
+	STAGE_DATA_ENUM_COUNT
+} StageDataType;
+
 static PixalcFPtrs alloc = {
 	.fpMalloc = malloc,
 	.fpCalloc = calloc,
 	.fpFree = free,
 	.fpRealloc = realloc
 };
+
+typedef struct Required {
+	CarkDesc *pArr;
+	I32 size;
+} Required;
+
+//first required element not included,
+//eg STAGE_DATA_MESH requires CARK_DESC_FACE as root struct
+static CarkDesc requiredMeshArr[] = {CARK_DESC_POS};
+static Required requiredTable[STAGE_DATA_ENUM_COUNT] = {0};
+
+static StageDataType typeFromDesc[CARK_DESC_ENUM_COUNT] = {0};
+
+typedef struct V3_F32Arr {
+PixtyV3_F32 *pArr;
+	I32 size;
+	I32 count;
+} V3_F32Arr;
+
+typedef struct Mesh {
+	PixtyI32Arr faces;
+	PixtyI32Arr corners;
+	V3_F32Arr pos;
+} Mesh;
 
 static
 void shaderLogPrint(GLuint shader) {
@@ -280,7 +312,7 @@ PixErr draw(
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	glClearColor(.2f, .2f, .2f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glUseProgram(pGlCtx->prog);
 
 	float aspect = (F32)windowSize.d[0] / (F32)windowSize.d[1];
@@ -304,6 +336,8 @@ PixErr draw(
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
 	glBindVertexArray(pGlCtx->vao);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	glEnable(GL_DEPTH_TEST);
 	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, NULL);
 	err = carkGuiDraw();
 	PIX_ERR_RETURN_IFNOT(err, "");
@@ -446,6 +480,442 @@ void sessionDestroy(Session *pSession) {
 	*pSession = (Session){0};
 }
 
+#define STACK_SIZE 32
+
+typedef struct StackEntry {
+	CarkRef ref;
+	I32 nextComp;
+	U32 nextRef : 30;
+	U32 singleComp : 1;
+	U32 seen : 1;
+} StackEntry;
+
+typedef struct Stack {
+	StackEntry stack[STACK_SIZE];
+	I32 ptr;
+} Stack;
+
+typedef struct EntryPtrs {
+	const CarkStage *pStage;
+	const CarkStructInfo *pStruct;
+	const CarkCompInfo *pComp;
+} EntryPtrs;
+
+static
+EntryPtrs stackEntryPtrsGet(const Session *pSession, const StackEntry *pEntry) {
+	const CarkStage *pStage = pSession->info.pStageArr->pArr + pEntry->ref.stageIdx;
+	const CarkStructInfo *pStruct = &pStage->pStructArr[pEntry->ref.structIdx].info;
+	return (EntryPtrs) {
+		.pStage = pStage,
+		.pStruct = pStruct,
+		.pComp = pStruct->pCompArr + pEntry->ref.compIdx
+	};
+}
+
+static
+void stackPush(
+	const Session *pSession,
+	Stack *pStack,
+	const CarkRef *pRef
+) {
+	const StackEntry *pParentEntry = pStack->stack + pStack->ptr;
+	I32 stageIdx = pRef->stageIdx == -1 ? pParentEntry->ref.stageIdx : pRef->stageIdx;
+	const CarkStage *pStage = pSession->info.pStageArr->pArr + stageIdx;
+	I32 structIdx = pRef->structIdx == -1 ? pParentEntry->ref.structIdx : pRef->structIdx;
+	const CarkStructInfo *pStruct = &pStage->pStructArr[structIdx].info;
+	bool singleComp = pRef->compIdx != -1;
+	I32 compIdx = singleComp ? pRef->compIdx : 0;
+
+	++pStack->ptr;
+	pStack->stack[pStack->ptr] = (StackEntry){
+		.ref = {.stageIdx = stageIdx, .structIdx = structIdx, .compIdx = compIdx},
+		.nextRef = 0,
+		.nextComp = compIdx,
+		.singleComp = singleComp
+	};
+}
+
+static
+void stackInit(Stack *pStack, I32 stageIdx, I32 structIdx) {
+	*pStack = (Stack){
+		.stack = {
+			{
+				.ref = {
+					.stageIdx = stageIdx,
+					.structIdx = structIdx
+				},
+				.nextRef = 0,
+				.nextComp = 0
+			}
+		}
+	};
+}
+
+static
+void stackPop(Stack *pStack) {
+	--pStack->ptr;
+}
+
+static
+bool stackPushNext(const Session *pSession, Stack *pStack) {
+	StackEntry *pEntry = pStack->stack + pStack->ptr;
+	EntryPtrs ptrs = stackEntryPtrsGet(pSession, pEntry);
+	pEntry->seen = true;
+	if (pEntry->nextRef < ptrs.pComp->refCount) {
+		const CarkRef *pRef = ptrs.pComp->refArr + pEntry->nextRef;
+		stackPush(pSession, pStack, pRef);
+		++pEntry->nextRef;
+		return true;
+	}
+	//TODO fix this, pushes individual position vec components
+	//shouldn't do that
+	/*
+	if (!pEntry->singleComp && pEntry->nextComp < ptrs.pStruct->compCount) {
+		ptrs.pComp = ptrs.pStruct->pCompArr + pEntry->nextComp;
+		stackPush(pSession, pStack, ptrs.pComp->refArr);
+		++pEntry->nextComp;
+		pEntry->nextRef = 0;
+		return true;
+	}
+	*/
+	return false;
+}
+
+typedef struct DescIdx {
+	CarkRef ref;
+	U32 order : 31;
+	U32 valid : 1;
+} DescIdx;
+
+static
+bool validAsStageDataType(const DescIdx *pContains, StageDataType type) {
+	const Required *pRequired = requiredTable + type;
+	for (I32 i = 0; i < pRequired->size; ++i) {
+		CarkDesc requiredDesc = pRequired->pArr[i];
+		DescIdx item = pContains[requiredDesc];
+		if (!item.valid) {
+			return false;
+		}
+		for (I32 j = 0; j < i; ++j) {
+			DescIdx itemPrev = pContains[pRequired->pArr[j]];
+			PIX_ERR_ASSERT("", itemPrev.valid && item.order != itemPrev.order);
+			if (item.order < itemPrev.order) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+//TODO allow for redirection of individual vector components,
+//eg, x, y and/or z are located in different structs.
+static
+bool structIsValid(const CarkStructInfo *pStruct, I32 compIdx) {
+	CarkCompDesc descCheck[CARK_COMP_DESC_ENUM_COUNT] = {0};
+	switch (pStruct->desc) {
+		case CARK_DESC_IDX:
+			if (pStruct->pCompArr[compIdx].desc != CARK_COMP_DESC_IDX) {
+				return false;
+			}
+			break;
+		case CARK_DESC_POS:
+			if (pStruct->compCount < 2 || pStruct->compCount > 3) {
+				return false;
+			}
+			for (I32 i = 0; i < pStruct->compCount; ++i) {
+				if (pStruct->pCompArr[i].type != CARK_TYPE_F32) {
+					return false;
+				}
+				descCheck[pStruct->pCompArr[i].desc] = true;
+			}
+			if (!descCheck[CARK_COMP_DESC_VEC_X] ||
+			    !descCheck[CARK_COMP_DESC_VEC_Y] ||
+			    !descCheck[CARK_COMP_DESC_VEC_Z]
+			) {
+				return false;
+			}
+			break;
+		case CARK_DESC_UV:
+			if (pStruct->compCount != 2) {
+				return false;
+			}
+			for (I32 i = 0; i < pStruct->compCount; ++i) {
+				if (pStruct->pCompArr[i].type != CARK_TYPE_F32) {
+					return false;
+				}
+				descCheck[pStruct->pCompArr[i].desc] = true;
+			}
+			if (!descCheck[CARK_COMP_DESC_VEC_X] || !descCheck[CARK_COMP_DESC_VEC_Y]) {
+				return false;
+			}
+			break;
+		default:
+			;
+	}
+	return true;
+}
+
+static
+bool seenEntry(const StackEntry *pEntry) {
+	return pEntry->seen;
+}
+
+static
+PixErr parseStructInfo(
+	const Session *pSession,
+	I32 stageIdx,
+	I32 structIdx,
+	StageDataType *pType,
+	DescIdx *pContains
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	I32 descOrder = 0;
+	Stack stack = {0};
+	stackInit(&stack, stageIdx, structIdx);
+	*pType = typeFromDesc[
+		stackEntryPtrsGet(pSession, stack.stack + stack.ptr).pStruct->desc
+	];
+	bool pop;
+	do {
+		pop = true;
+		StackEntry *pEntry = stack.stack + stack.ptr;
+		EntryPtrs ptrs = stackEntryPtrsGet(pSession, pEntry);
+		CarkDesc desc = ptrs.pStruct->desc;
+		if (!pEntry->seen) {
+			if (!structIsValid(ptrs.pStruct, pEntry->ref.compIdx)) {
+				continue;
+			}
+			if (desc != CARK_DESC_IDX) {
+				pContains[desc] = (DescIdx){
+					.ref = pEntry->ref,
+					.order = descOrder,
+					.valid = true
+				};
+				++descOrder;
+			}
+		}
+		if (stackPushNext(pSession, &stack)) {
+			pop = false;
+		}
+	} while(pop ? stackPop(&stack) : 0, stack.ptr >= 0); 
+	if (!validAsStageDataType(pContains, *pType)) {
+		//fallback to array,
+		//this will simple display structure in a spreadsheet format
+		*pType = STAGE_DATA_ARRAY;
+	}
+	return err;
+}
+
+static
+const CarkStruct *structFromRef(const Session *pSession, CarkRef ref) {
+	return pSession->info.pStageArr->pArr[ref.stageIdx].pStructArr + ref.structIdx;
+}
+
+static
+const CarkInStructLog *structLogFromRef(const Session *pSession, CarkRef ref) {
+	return pSession->logArr.pArr[ref.stageIdx].structs.pArr + ref.structIdx;
+}
+
+typedef struct FaceRange {
+	I32 start;
+	I32 size;
+} FaceRange;
+
+static
+PixErr faceCornersGet(
+	const Session *pSession,
+	const DescIdx *pContains,
+	FaceRange faceRange,
+	PixtyI32Arr *pCornerBuf
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	pCornerBuf->count = 0;
+	CarkRef cornerRef = pContains[CARK_DESC_CORNER].ref;
+	const CarkStruct *pCornerInfo = structFromRef(pSession, cornerRef);
+	const CarkInStructLog *pCornerLog = structLogFromRef(pSession, cornerRef);
+	PixtyRange range = (PixtyRange){0};
+	I32 cornerOffset = 0;
+	bool found = false;
+	for (I32 i = 0; i < pCornerLog->rangeArr.count; ++i) {
+		range = pCornerLog->rangeArr.pArr[i];
+		if (faceRange.start >= range.start &&
+		    faceRange.start + faceRange.size <= range.end
+		) {
+			found = true;
+			break;
+		}
+		cornerOffset += range.end - range.start;
+	}
+	if (!found) {
+		return err;//corners weren't logged
+	}
+	for (I32 i = 0; i < faceRange.size; ++i) {
+		I32 idx = cornerOffset + faceRange.start - range.start + i;
+		I32 byteIdx = idx * pCornerInfo->byteSize;
+		I32 vertIdx = *(I32 *)(pCornerLog->data.pArr + byteIdx + sizeof(F32));
+		I32 newIdx = 0;
+		PIXALC_DYN_ARR_ADD(I32, &alloc, pCornerBuf, newIdx);
+		pCornerBuf->pArr[newIdx] = vertIdx;
+	}
+	return err;
+}
+
+static
+PixErr facePosGet(
+	const Session *pSession,
+	const DescIdx *pContains,
+	FaceRange faceRange,
+	PixtyI32Arr *pCornerBuf,
+	V3_F32Arr *pPosBuf,
+	PixtyValidIdx *pVertRedir,
+	bool *pNoLog
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	pPosBuf->count = 0;
+	CarkRef posRef = pContains[CARK_DESC_POS].ref;
+	const CarkStruct *pPosInfo = structFromRef(pSession, posRef);
+	const CarkInStructLog *pPosLog = structLogFromRef(pSession, posRef);
+	PIX_ERR_ASSERT("", faceRange.size == pCornerBuf->count);
+	for (I32 i = 0; i < faceRange.size; ++i) {
+		I32 vertIdx = pCornerBuf->pArr[i];
+		if (pVertRedir[vertIdx].valid) {
+			pCornerBuf->pArr[i] = (I32)pVertRedir[vertIdx].idx;
+			continue;
+		}
+		I32 posOffset = 0;
+		PixtyV3_F32 pos = {0};
+		bool found = false;
+		for (I32 j = 0; j < pPosLog->rangeArr.count; ++j) {
+			PixtyRange vertRange = pPosLog->rangeArr.pArr[j];
+			if (vertIdx >= vertRange.start && vertIdx < vertRange.end) {
+				I32 byteIdx = (posOffset + vertIdx - vertRange.start) * pPosInfo->byteSize;
+				memcpy(
+					pos.d,
+					pPosLog->data.pArr + byteIdx + sizeof(F32),
+					sizeof(PixtyV3_F32)
+				);
+				found = true;
+				break;
+			}
+			posOffset += vertRange.end - vertRange.start;
+		}
+		if (!found) {
+			*pNoLog = true;
+			return err;//pos wasn't logged
+		}
+		I32 newIdx = 0;
+		PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, pPosBuf, newIdx);
+		pPosBuf->pArr[newIdx] = pos;
+		pCornerBuf->pArr[i] = newIdx;
+		pVertRedir[vertIdx] = (PixtyValidIdx){.valid = true, .idx = (U32)newIdx};
+	}
+	return err;
+}
+
+//TODO generalise (eg mesh may not use a corner list)
+static
+PixErr meshFromLog(
+	const Session *pSession,
+	const DescIdx *pContains,
+	PixtyI32Arr *pCornerBuf,
+	V3_F32Arr *pPosBuf,
+	Mesh *pMesh
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	CarkRef faceRef = pContains[CARK_DESC_FACE].ref;
+	const CarkStruct *pFaceInfo = structFromRef(pSession, faceRef);
+	const CarkInStructLog *pFaceLog = structLogFromRef(pSession, faceRef);
+	
+	I32 vertCount;
+	{
+		CarkRef posRef = pContains[CARK_DESC_POS].ref;
+		const CarkInStructLog *pPosLog = structLogFromRef(pSession, posRef);
+		vertCount = carkInStructLogCount(pPosLog);
+	}
+	PixtyValidIdx *pVertRedir = calloc(vertCount, sizeof(PixtyValidIdx));
+	I32 faceOffset = 0;
+	for (I32 i = 0; i < pFaceLog->rangeArr.count; ++i) {
+		PixtyRange range = pFaceLog->rangeArr.pArr[i];
+		I32 rangeSize = range.end - range.start;
+		for (I32 j = 0; j < rangeSize; ++j) {
+			if (i + 1 == pFaceLog->rangeArr.count && j + 1 == range.end) {
+				continue;//last face entry is used for face size
+			}
+			I32 byteIdx = (faceOffset + j) * pFaceInfo->byteSize;
+			const U8 *pData = pFaceLog->data.pArr + byteIdx;
+			FaceRange faceRange = {.start = *(I32 *)(pData + sizeof(F32))};
+			I32 faceEnd = *(I32 *)(pData + pFaceInfo->byteSize + sizeof(F32));
+			faceRange.size = faceEnd - faceRange.start;
+			err = faceCornersGet(pSession, pContains, faceRange, pCornerBuf);
+			PIX_ERR_THROW_IFNOT(err, "", 0);
+			if (!pCornerBuf->count) {
+				//one or all corners weren't logged
+				break;
+			}
+			bool noLog = false;
+			err = facePosGet(
+				pSession,
+				pContains,
+				faceRange,
+				pCornerBuf,
+				pPosBuf,
+				pVertRedir,
+				&noLog
+			);
+			PIX_ERR_THROW_IFNOT(err, "", 0);
+			if (noLog) {
+				break;//one or all positions weren't logged
+			}
+			I32 newIdx = 0;
+			PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->faces, newIdx);
+			pMesh->faces.pArr[newIdx] = pMesh->corners.count;
+			I32 newSize = pMesh->corners.count + pCornerBuf->count;
+			PIXALC_DYN_ARR_RESIZE(I32, &alloc, &pMesh->corners, newSize);
+			memcpy(
+				pMesh->corners.pArr + pMesh->corners.count,
+				pCornerBuf->pArr,
+				pCornerBuf->count * sizeof(I32)
+			);
+			if (!pPosBuf->count) {
+				continue;//verts are already in mesh
+			}
+			newSize = pMesh->pos.count + pPosBuf->count;
+			PIXALC_DYN_ARR_RESIZE(PixtyV3_F32, &alloc, &pMesh->pos, newSize);
+			memcpy(
+				pMesh->pos.pArr + pMesh->pos.count,
+				pPosBuf->pArr,
+				pPosBuf->count * sizeof(PixtyV3_F32)
+			);
+		}
+		faceOffset += rangeSize;
+	}
+	PIX_ERR_CATCH(0, err, ;);
+	if (pVertRedir) {
+		free(pVertRedir);
+	}
+	return err;
+}
+
+static
+PixErr meshTriangulate(Mesh *pMesh) {
+	PixErr err = PIX_ERR_SUCCESS;
+	return err;
+}
+
+static
+void meshDestroy(Mesh *pMesh) {
+	if (pMesh->faces.pArr) {
+		free(pMesh->faces.pArr);
+	}
+	if (pMesh->corners.pArr) {
+		free(pMesh->corners.pArr);
+	}
+	if (pMesh->pos.pArr) {
+		free(pMesh->pos.pArr);
+	}
+	*pMesh = (Mesh){0};
+}
+
 static
 PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	PixErr err = PIX_ERR_SUCCESS;
@@ -467,13 +937,10 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		&pSession->logArr,
 		pSession->info.pStageArr->count
 	);
+	pSession->logArr.size = pSession->info.pStageArr->count;
+	pSession->logArr.pArr = calloc(pSession->logArr.size, sizeof(CarkInStageLog));
 	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
-		err = carkInFileLoadLog(
-			&carkCtx,
-			&pSession->file,
-			i,
-			pSession->logArr.pArr + i
-		);
+		err = carkInFileLoadLog(&carkCtx, &pSession->file, i, pSession->logArr.pArr + i);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
 	}
 	PIX_ERR_CATCH(1, err, ;);
@@ -485,9 +952,40 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	free(pGui->pFileDialogPath);
 	pGui->pFileDialogPath = NULL;
 	PIX_ERR_THROW_IFNOT(err, "", 0);
+
+	PixtyI32Arr cornerBuf = {0};
+	V3_F32Arr posBuf = {0};
+	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
+		const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
+		if (!pStage->structCount) {
+			continue;
+		}
+		StageDataType type = STAGE_DATA_NONE;
+		//TODO search through all structs in stage to find roots,
+		//currently only using struct at idx 0
+		DescIdx contains[CARK_DESC_ENUM_COUNT] = {0};
+		err = parseStructInfo(pSession, i, 0, &type, contains);
+		PIX_ERR_THROW_IFNOT(err, "", 1);
+		if (type != STAGE_DATA_MESH) {
+			continue;//TODO handle other types like ARRAY
+		}
+		Mesh mesh = {0};
+		err = meshFromLog(pSession, contains, &cornerBuf, &posBuf, &mesh);
+		PIX_ERR_THROW_IFNOT(err, "", 0);
+		err = meshTriangulate(&mesh);
+		PIX_ERR_THROW_IFNOT(err, "", 0);
+		meshDestroy(&mesh);
+	}
+
 	PIX_ERR_CATCH(0, err,
 		sessionClear(pSession);
 	);
+	if (cornerBuf.pArr) {
+		free(cornerBuf.pArr);
+	}
+	if (posBuf.pArr) {
+		free(posBuf.pArr);
+	}
 	return err;
 }
 
@@ -553,8 +1051,22 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	return err;
 }
 
+static
+void init() {
+	requiredTable[STAGE_DATA_MESH] = (Required){
+		.pArr = requiredMeshArr,
+		.size = sizeof(requiredMeshArr) / sizeof(CarkDesc)
+	};
+
+	typeFromDesc[CARK_DESC_MESH] = STAGE_DATA_MESH;
+	typeFromDesc[CARK_DESC_FACE] = STAGE_DATA_MESH;
+}
+
 int main(int argc, char **argv) {
 	PixErr err = PIX_ERR_SUCCESS;
+
+	init();
+
 	SDL_WindowFlags windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
 	SDL_Window *pWindow = SDL_CreateWindow("Cark Vis", 720, 480, windowFlags);
 	GlCtx glCtx = {0};

@@ -7,6 +7,7 @@ typedef int16_t I16;
 typedef int32_t I32;
 typedef uint32_t U32;
 typedef int64_t I64;
+typedef float F32;
 
 #define CARK_WINDOW_BITS 31 //15 (+16 as using gzip)
 #define CARK_FILE_VERSION 100
@@ -876,11 +877,13 @@ PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *p
 
 static
 void decodeCompRef(PixioByteArr *pBuf, CarkRef *pRef) {
-	pixioByteArrRead(pBuf, &pRef->stageIdx, BITLEN(REF_STAGE_IDX));
-	pixioByteArrRead(pBuf, &pRef->structIdx, BITLEN(REF_STRUCT_IDX));
-	I32 compIdx = 0;
-	pixioByteArrRead(pBuf, &compIdx, BITLEN(REF_COMP_IDX));
-	pRef->compIdx = compIdx;
+	I16 buf = 0;
+	pixioByteArrRead(pBuf, &buf, BITLEN(REF_STAGE_IDX));
+	pRef->stageIdx = (I32)buf;
+	pixioByteArrRead(pBuf, &buf, BITLEN(REF_STRUCT_IDX));
+	pRef->structIdx = (I32)buf;
+	pixioByteArrRead(pBuf, &buf, BITLEN(REF_COMP_IDX));
+	pRef->compIdx = (I32)buf;
 }
 
 static
@@ -1087,23 +1090,22 @@ PixErr decodeLog(
 		structsLogged > 0 && rangeTotal > 0 && dataTotal > 0,
 		"log empty or corrupt"
 	);
-	pLog->pStructArr = pCtx->alloc.fpCalloc(structsLogged, sizeof(CarkInStructLog));
+	PIXALC_DYN_ARR_RESIZE(CarkInStructLog, &pCtx->alloc, &pLog->structs, structsLogged);
 	PIXALC_DYN_ARR_RESIZE(PixtyRange, &pCtx->alloc, &pLog->rangeMem, rangeTotal);
 	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pLog->dataMem, dataTotal);
-	pLog->pStructTable = pCtx->alloc.fpCalloc(pStage->structCount, sizeof(I32));
+	pLog->structs.count = structsLogged;
 	for (I32 i = 0; i < structsLogged; ++i) {
-		CarkInStructLog *pStructLog = pLog->pStructArr + i;
-		I32 structIdx = 0;
-		pixioByteArrRead(&pMem->buf, &structIdx, BITLEN(LOG_STRUCT));
+		CarkInStructLog *pStructLog = pLog->structs.pArr + i;
+		*pStructLog = (CarkInStructLog){0};
+		pixioByteArrRead(&pMem->buf, &pStructLog->idx, BITLEN(LOG_STRUCT));
 		PIX_ERR_RETURN_IFNOT_COND(
 			err,
-			structIdx >= 0 && structIdx < pStage->structCount,
+			pStructLog->idx >= 0 && pStructLog->idx < pStage->structCount,
 			"struct idx is out of bounds"
 		);
-		pLog->pStructTable[structIdx] = i;
 		I32 count = 0;
 		pixioByteArrRead(&pMem->buf, &count, BITLEN(LOG_COUNT));
-		I32 byteSize = structByteSize(pStage->pStructArr + structIdx, false);
+		I32 byteSize = structByteSize(pStage->pStructArr + pStructLog->idx, false);
 		pStructLog->data.count = count * byteSize;
 		pStructLog->data.pArr = pLog->dataMem.pArr + pLog->dataMem.count;
 		pLog->dataMem.count += pStructLog->data.count;
@@ -1149,6 +1151,47 @@ PixErr loadLog(
 	return err;
 }
 
+void carkInFileLogClear(CarkInStageLog *pLog) {
+	pLog->dataMem.count = pLog->rangeMem.count = pLog->structs.count = 0;
+}
+
+I32 carkInStructLogCount(const CarkInStructLog *pLog) {
+	I32 count = 0;
+	for (I32 i = 0; i < pLog->rangeArr.count; ++i) {
+		PixtyRange range = pLog->rangeArr.pArr[i];
+		count += range.end - range.start;
+	}
+	return count;
+}
+
+PixErr carkInLogIdx(
+	const CarkInStructLog *pLog,
+	const CarkStage *pStage,
+	I32 itemIdx,
+	CarkInLogItem *pItem
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	I32 offset = 0;
+	//TODO use bst
+	for (I32 i = 0; i < pLog->rangeArr.count; ++i) {
+		PixtyRange range = pLog->rangeArr.pArr[i];
+		if (itemIdx >= range.start && itemIdx < range.end) {
+			itemIdx += offset - range.start;
+			PIX_ERR_ASSERT("", itemIdx >= 0 && itemIdx < pLog->data.count);
+			I32 byteSize = pStage->pStructArr[pLog->idx].byteSize;
+			const U8 *pData = pLog->data.pArr + itemIdx * byteSize;
+			*pItem = (CarkInLogItem){
+				.timestamp = *(F32 *)pData,
+				.pData = pData + sizeof(F32)
+			};
+			return err;
+		}
+		offset += range.end - range.start;
+	}
+	*pItem = (CarkInLogItem){0};
+	PIX_ERR_RETURN(err, "no item at specified index");
+}
+
 PixErr carkInFileLoadLog(
 	CarkInCtx *pCtx,
 	CarkInFile *pFile,
@@ -1174,11 +1217,8 @@ void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog) {
 	if (pLog->rangeMem.pArr) {
 		pAlloc->fpFree(pLog->rangeMem.pArr);
 	}
-	if (pLog->pStructArr) {
-		pAlloc->fpFree(pLog->pStructArr);
-	}
-	if (pLog->pStructTable) {
-		pAlloc->fpFree(pLog->pStructTable);
+	if (pLog->structs.pArr) {
+		pAlloc->fpFree(pLog->structs.pArr);
 	}
 	*pLog = (CarkInStageLog){0};
 }
