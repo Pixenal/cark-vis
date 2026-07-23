@@ -5,11 +5,13 @@
 #include <pixenals_error_utils.h>
 #include <pixenals_types.h>
 #include <pixenals_math_utils.h>
+#include <pixenals_mesh_utils.h>
 
 #include <cark_vis_gui.hpp>
 
 #define CARK_PATH_LEN_MAX 4096
 #define PI 3.1415926536f
+#define VERT_POS_LOCATION 0
 
 typedef int16_t I16;
 typedef int32_t I32;
@@ -98,10 +100,16 @@ PixtyV3_F32 *pArr;
 	I32 count;
 } V3_F32Arr;
 
+typedef struct FaceRange {
+	I32 start;
+	I32 size;
+} FaceRange;
+
 typedef struct Mesh {
 	PixtyI32Arr faces;
 	PixtyI32Arr corners;
 	V3_F32Arr pos;
+	bool tris;
 } Mesh;
 
 static
@@ -256,8 +264,8 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pGlCtx->ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cornerArr), cornerArr, GL_STATIC_DRAW);
 	I32 vec3Size = 3 * sizeof(GL_FLOAT);
-	glVertexAttribPointer(pGlCtx->vertPosLocation, 3, GL_FLOAT, false, vec3Size, NULL);
-	glEnableVertexAttribArray(pGlCtx->vertPosLocation);
+	glVertexAttribPointer(VERT_POS_LOCATION, 3, GL_FLOAT, false, vec3Size, NULL);
+	glEnableVertexAttribArray(VERT_POS_LOCATION);
 
 	glGenBuffers(1, &pGlCtx->ubo);
 	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
@@ -306,6 +314,7 @@ PixtyM4x4 perspective(double yFov, double aspect, double zNear, double zFar) {
 static
 PixErr draw(
 	SDL_Window *pWindow,
+	Session *pSession,
 	GlCtx *pGlCtx,
 	const View *pView,
 	PixtyV2_I32 windowSize
@@ -334,14 +343,20 @@ PixErr draw(
 	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DrawArgs), &drawArgs);
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
-
-	glBindVertexArray(pGlCtx->vao);
+	I32 triCount;
+	if (pSession->renderMesh.triCount) {
+		glBindVertexArray(pSession->renderMesh.vao);
+		triCount = pSession->renderMesh.triCount;
+	}
+	else {
+		glBindVertexArray(pGlCtx->vao);
+		triCount = 12;
+	}
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glEnable(GL_DEPTH_TEST);
-	glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, NULL);
+	glDrawElements(GL_TRIANGLES, triCount * 3, GL_UNSIGNED_INT, NULL);
 	err = carkGuiDraw();
 	PIX_ERR_RETURN_IFNOT(err, "");
-
 	SDL_ERR_RET(SDL_GL_SwapWindow(pWindow));
 	return err;
 }
@@ -618,6 +633,17 @@ bool structIsValid(const CarkStructInfo *pStruct, I32 compIdx) {
 				return false;
 			}
 			break;
+		case CARK_DESC_FACE:
+			if (pStruct->pCompArr[compIdx].desc != CARK_COMP_DESC_IDX) {
+				return false;
+			}
+			for (I32 i = 0; i < pStruct->compCount; ++i) {
+				descCheck[pStruct->pCompArr[i].desc] = true;
+			}
+			if (!descCheck[CARK_COMP_DESC_SIZE]) {
+				return false;
+			}
+			break;
 		case CARK_DESC_POS:
 			if (pStruct->compCount < 2 || pStruct->compCount > 3) {
 				return false;
@@ -716,11 +742,6 @@ const CarkInStructLog *structLogFromRef(const Session *pSession, CarkRef ref) {
 	return pSession->logArr.pArr[ref.stageIdx].structs.pArr + ref.structIdx;
 }
 
-typedef struct FaceRange {
-	I32 start;
-	I32 size;
-} FaceRange;
-
 static
 PixErr faceCornersGet(
 	const Session *pSession,
@@ -751,7 +772,7 @@ PixErr faceCornersGet(
 	}
 	for (I32 i = 0; i < faceRange.size; ++i) {
 		I32 idx = cornerOffset + faceRange.start - range.start + i;
-		I32 byteIdx = idx * pCornerInfo->byteSize;
+		I32 byteIdx = idx * (pCornerInfo->byteSize + sizeof(I32));
 		I32 vertIdx = *(I32 *)(pCornerLog->data.pArr + byteIdx + sizeof(F32));
 		I32 newIdx = 0;
 		PIXALC_DYN_ARR_ADD(I32, &alloc, pCornerBuf, newIdx);
@@ -779,7 +800,6 @@ PixErr facePosGet(
 	for (I32 i = 0; i < faceRange.size; ++i) {
 		I32 vertIdx = pCornerBuf->pArr[i];
 		if (pVertRedir[vertIdx].valid) {
-			pCornerBuf->pArr[i] = (I32)pVertRedir[vertIdx].idx;
 			continue;
 		}
 		I32 posOffset = 0;
@@ -788,7 +808,7 @@ PixErr facePosGet(
 		for (I32 j = 0; j < pPosLog->rangeArr.count; ++j) {
 			PixtyRange vertRange = pPosLog->rangeArr.pArr[j];
 			if (vertIdx >= vertRange.start && vertIdx < vertRange.end) {
-				I32 byteIdx = (posOffset + vertIdx - vertRange.start) * pPosInfo->byteSize;
+				I32 byteIdx = (posOffset + vertIdx - vertRange.start) * (pPosInfo->byteSize + sizeof(I32));
 				memcpy(
 					pos.d,
 					pPosLog->data.pArr + byteIdx + sizeof(F32),
@@ -806,10 +826,38 @@ PixErr facePosGet(
 		I32 newIdx = 0;
 		PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, pPosBuf, newIdx);
 		pPosBuf->pArr[newIdx] = pos;
-		pCornerBuf->pArr[i] = newIdx;
-		pVertRedir[vertIdx] = (PixtyValidIdx){.valid = true, .idx = (U32)newIdx};
 	}
 	return err;
+}
+
+static
+void meshAddFace(
+	Mesh *pMesh,
+	FaceRange faceRange,
+	const PixtyI32Arr *pCornerBuf,
+	const V3_F32Arr *pPosBuf,
+	PixtyValidIdx *pVertRedir
+) {
+	I32 newIdx = 0;
+	PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->faces, newIdx);
+	pMesh->faces.pArr[newIdx] = pMesh->corners.count;
+	I32 posBufIdx = 0;
+	for (I32 i = 0; i < faceRange.size; ++i) {
+		PixtyValidIdx *pRedirEntry = pVertRedir + pCornerBuf->pArr[i];
+		I32 vertIdx = 0;
+		if (pRedirEntry->valid) {
+			vertIdx = (I32)pRedirEntry->idx;
+		}
+		else {
+			PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, &pMesh->pos, vertIdx);
+			pMesh->pos.pArr[vertIdx] = pPosBuf->pArr[posBufIdx];
+			++posBufIdx;
+			*pRedirEntry = (PixtyValidIdx){.valid = true, .idx = vertIdx};
+		}
+		newIdx = 0;
+		PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->corners, newIdx);
+		pMesh->corners.pArr[newIdx] = vertIdx;
+	}
 }
 
 //TODO generalise (eg mesh may not use a corner list)
@@ -834,18 +882,28 @@ PixErr meshFromLog(
 	}
 	PixtyValidIdx *pVertRedir = calloc(vertCount, sizeof(PixtyValidIdx));
 	I32 faceOffset = 0;
+
+	I32 sizeCompIdx = -1;
+	for (I32 i = 0; i < pFaceInfo->info.compCount; ++i) {
+		if (pFaceInfo->info.pCompArr[i].desc == CARK_COMP_DESC_SIZE) {
+			sizeCompIdx = i;
+			break;
+		}
+	}
+	PIX_ERR_ASSERT("existance of size comp was checked during parsing", sizeCompIdx != -1);
 	for (I32 i = 0; i < pFaceLog->rangeArr.count; ++i) {
 		PixtyRange range = pFaceLog->rangeArr.pArr[i];
 		I32 rangeSize = range.end - range.start;
 		for (I32 j = 0; j < rangeSize; ++j) {
-			if (i + 1 == pFaceLog->rangeArr.count && j + 1 == range.end) {
-				continue;//last face entry is used for face size
-			}
-			I32 byteIdx = (faceOffset + j) * pFaceInfo->byteSize;
+			I32 byteIdx = (faceOffset + j) * (pFaceInfo->byteSize + sizeof(I32));
 			const U8 *pData = pFaceLog->data.pArr + byteIdx;
-			FaceRange faceRange = {.start = *(I32 *)(pData + sizeof(F32))};
-			I32 faceEnd = *(I32 *)(pData + pFaceInfo->byteSize + sizeof(F32));
-			faceRange.size = faceEnd - faceRange.start;
+			//TODO assuming components before size comp are i32,
+			//put a func in io lib to get byte offset of a component idx
+			//(accounting for byte size of other components in struct)
+			FaceRange faceRange = {
+				.start = *(I32 *)(pData + sizeof(F32)),
+				.size = *(I32 *)(pData + sizeof(F32) + sizeCompIdx * sizeof(I32))
+			};
 			err = faceCornersGet(pSession, pContains, faceRange, pCornerBuf);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			if (!pCornerBuf->count) {
@@ -866,29 +924,12 @@ PixErr meshFromLog(
 			if (noLog) {
 				break;//one or all positions weren't logged
 			}
-			I32 newIdx = 0;
-			PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->faces, newIdx);
-			pMesh->faces.pArr[newIdx] = pMesh->corners.count;
-			I32 newSize = pMesh->corners.count + pCornerBuf->count;
-			PIXALC_DYN_ARR_RESIZE(I32, &alloc, &pMesh->corners, newSize);
-			memcpy(
-				pMesh->corners.pArr + pMesh->corners.count,
-				pCornerBuf->pArr,
-				pCornerBuf->count * sizeof(I32)
-			);
-			if (!pPosBuf->count) {
-				continue;//verts are already in mesh
-			}
-			newSize = pMesh->pos.count + pPosBuf->count;
-			PIXALC_DYN_ARR_RESIZE(PixtyV3_F32, &alloc, &pMesh->pos, newSize);
-			memcpy(
-				pMesh->pos.pArr + pMesh->pos.count,
-				pPosBuf->pArr,
-				pPosBuf->count * sizeof(PixtyV3_F32)
-			);
+			meshAddFace(pMesh, faceRange, pCornerBuf, pPosBuf, pVertRedir);
 		}
 		faceOffset += rangeSize;
 	}
+	PIXALC_DYN_ARR_RESIZE(I32, &alloc, &pMesh->faces, pMesh->faces.count + 1);
+	pMesh->faces.pArr[pMesh->faces.count] = pMesh->corners.count;
 	PIX_ERR_CATCH(0, err, ;);
 	if (pVertRedir) {
 		free(pVertRedir);
@@ -897,8 +938,75 @@ PixErr meshFromLog(
 }
 
 static
+void triAdd(PixtyI32Arr *pTris, const Mesh *pMesh, I32 start, I32 a, I32 b, I32 c) {
+	PIXALC_DYN_ARR_RESIZE(I32, &alloc, pTris, pTris->count + 3);
+	pTris->pArr[pTris->count + 0] = pMesh->corners.pArr[start + a];
+	pTris->pArr[pTris->count + 1] = pMesh->corners.pArr[start + b];
+	pTris->pArr[pTris->count + 2] = pMesh->corners.pArr[start + c];
+	pTris->count += 3;
+}
+
+static
+PixtyV3_F32 meshPosGet(const void *pMeshRaw, PixmshFaceRange face, int32_t corner) {
+	const Mesh *pMesh = pMeshRaw;
+	I32 cornerAbs = face.start + corner;
+	PIX_ERR_ASSERT("", cornerAbs >= 0 && cornerAbs < pMesh->corners.count);
+	I32 vertIdx = pMesh->corners.pArr[cornerAbs];
+	PIX_ERR_ASSERT("", vertIdx >= 0 && vertIdx < pMesh->pos.count);
+	return pMesh->pos.pArr[vertIdx];
+}
+
+static
 PixErr meshTriangulate(Mesh *pMesh) {
 	PixErr err = PIX_ERR_SUCCESS;
+	PixtyI32Arr tris = {0};
+	PixtyU8Arr idxBuf = {0};
+	PIX_ERR_ASSERT("", pMesh->faces.pArr && pMesh->corners.pArr && pMesh->pos.pArr);
+	for (I32 i = 0; i < pMesh->faces.count; ++i) {
+		FaceRange face = {.start = pMesh->faces.pArr[i]};
+		face.size = pMesh->faces.pArr[i + 1] - face.start;
+		if (face.size == 3) {
+			triAdd(&tris, pMesh, face.start, 0, 1, 2);
+			continue;
+		}
+		if (face.size == 4) {
+			triAdd(&tris, pMesh, face.start, 0, 1, 2);
+			triAdd(&tris, pMesh, face.start, 2, 3, 0);
+			continue;
+		}
+		if (face.size > (I32)UINT8_MAX) {
+			continue;//idx-buf uses U8, so skip this face
+		}
+		PIX_ERR_ASSERT("", face.size >= 2);
+		PIXALC_DYN_ARR_RESIZE(U8, &alloc, &idxBuf, face.size - 2);
+		I32 triCount = pixmshTriangulateFace(
+			&alloc,
+			(PixmshFaceRange){.start = face.start, .size = face.size},
+			pMesh,
+			meshPosGet,
+			idxBuf.pArr
+		);
+		for (I32 j = 0; j < triCount; ++j) {
+			I32 start = j * 3;
+			triAdd(
+				&tris,
+				pMesh,
+				face.start,
+				idxBuf.pArr[start + 0],
+				idxBuf.pArr[start + 1],
+				idxBuf.pArr[start + 2]
+			);
+		}
+	}
+	free(pMesh->faces.pArr);
+	pMesh->faces = (PixtyI32Arr){0};
+	free(pMesh->corners.pArr);
+	pMesh->corners = tris;
+	pMesh->tris = true;
+
+	if (idxBuf.pArr) {
+		free(idxBuf.pArr);
+	}
 	return err;
 }
 
@@ -917,12 +1025,42 @@ void meshDestroy(Mesh *pMesh) {
 }
 
 static
+PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh) {
+	PixErr err = PIX_ERR_SUCCESS;
+	glGenVertexArrays(1, &pSession->renderMesh.vao);
+	glBindVertexArray(pSession->renderMesh.vao);
+	glGenBuffers(1, &pSession->renderMesh.ebo);
+	glGenBuffers(1, &pSession->renderMesh.vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pSession->renderMesh.vbo);
+	glBufferData(
+		GL_ARRAY_BUFFER,
+		pMesh->pos.count * sizeof(PixtyV3_F32),
+		pMesh->pos.pArr,
+		GL_STATIC_DRAW
+	);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pSession->renderMesh.ebo);
+	glBufferData(
+		GL_ELEMENT_ARRAY_BUFFER,
+		pMesh->corners.count * sizeof(I32),
+		pMesh->corners.pArr,
+		GL_STATIC_DRAW
+	);
+	I32 vecSize = sizeof(PixtyV3_F32);
+	glVertexAttribPointer(VERT_POS_LOCATION, 3, GL_FLOAT, false, vecSize, NULL);
+	glEnableVertexAttribArray(VERT_POS_LOCATION);
+	pSession->renderMesh.triCount = pMesh->corners.count / 3;
+	return err;
+}
+
+static
 PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	PixErr err = PIX_ERR_SUCCESS;
 	printf("opening log file %s\n", pGui->pFileDialogPath);
 	
 	sessionClear(pSession);
 	CarkInCtx carkCtx = {0};
+	PixtyI32Arr cornerBuf = {0};
+	V3_F32Arr posBuf = {0};
 	err = carkInInit(NULL, NULL, &carkCtx);
 	PIX_ERR_THROW_IFNOT(err, "", 1);
 	err = carkInFileInit(&carkCtx, &pSession->file);
@@ -953,8 +1091,6 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	pGui->pFileDialogPath = NULL;
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 
-	PixtyI32Arr cornerBuf = {0};
-	V3_F32Arr posBuf = {0};
 	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
 		const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
 		if (!pStage->structCount) {
@@ -973,6 +1109,8 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		err = meshFromLog(pSession, contains, &cornerBuf, &posBuf, &mesh);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		err = meshTriangulate(&mesh);
+		PIX_ERR_THROW_IFNOT(err, "", 0);
+		err = meshLoadOnGpu(pSession, &mesh);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		meshDestroy(&mesh);
 	}
@@ -1036,7 +1174,7 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		err = update(&gui, &session, &view);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 
-		err = draw(pWindow, pGlCtx, &view, windowSize);
+		err = draw(pWindow, &session, pGlCtx, &view, windowSize);
 		PIX_ERR_THROW_IFNOT(err, "draw failed", 0);
 		SDL_Delay(1);
 	} while(true);

@@ -4,11 +4,19 @@
 
 typedef struct LogArr {
 	CarkInStageLog *pArr;
-	I32 size;
+	int32_t size;
 } LogArr;
+
+typedef struct GpuMesh {
+	uint32_t vao;
+	uint32_t vbo;
+	uint32_t ebo;
+	int32_t triCount;
+} GpuMesh;
 
 typedef struct Session {
 	LogArr logArr;
 	CarkInFile file;
 	CarkInFileInfo info;
+	GpuMesh renderMesh;
 } Session;
