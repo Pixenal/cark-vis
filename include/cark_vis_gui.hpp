@@ -12,6 +12,7 @@
 typedef enum CarkGuiEvent {
 	CARK_GUI_EVENT_NONE,
 	CARK_GUI_EVENT_FILE_OPEN,
+	CARK_GUI_EVENT_README,
 	CARK_GUI_EVENT_ENUM_COUNT
 } CarkGuiEvent;
 
@@ -33,7 +34,8 @@ PixErr carkGuiEvent(const void *pEvent);
 PixErr carkGuiLayout(
 	Session *pSession,
 	PixtyV2_I32 windowSize,
-	CarkGuiEventQueue *pQueue
+	CarkGuiEventQueue *pQueue,
+	uint32_t viewportTex
 );
 PixErr carkGuiDraw();
 void carkGuiDestroy();

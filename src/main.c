@@ -54,6 +54,10 @@ typedef struct GlCtx {
 	GLuint ubo;
 	GLuint uboIdx;
 	GLuint uboBind;
+	GLuint frameBuf;
+	GLuint depthBuf;
+	GLuint targetTex;
+	PixtyV2_I32 frameSize;
 } GlCtx;
 
 typedef struct View {
@@ -193,9 +197,9 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	";
 	const GLchar *fragShaderSrc = "\
 		#version 410 core\n\
-		out vec4 fragColor;\
+		layout(location = 0) out vec3 fragColor;\
 		void main() {\
-			fragColor = vec4(1.0, .0, .0, 1.0);\
+			fragColor = vec3(1.0, .0, .0);\
 		}\
 	";
 	glShaderSource(vertShader, 1, &vertShaderSrc, NULL);
@@ -275,7 +279,6 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	glBindBufferBase(GL_UNIFORM_BUFFER, pGlCtx->uboBind, pGlCtx->ubo);
 	pGlCtx->uboIdx = glGetUniformBlockIndex(pGlCtx->prog, "drawArgs");
 	glUniformBlockBinding(pGlCtx->prog, pGlCtx->uboIdx, pGlCtx->uboBind);
-
 	return err;
 }
 
@@ -301,6 +304,56 @@ PixtyM4x4 frustum(
 }
 
 static
+PixErr frameBufInit(GlCtx *pGlCtx, PixtyV2_I32 size) {
+	PixErr err = PIX_ERR_SUCCESS;
+	if (!size.d[0] || !size.d[1]) {
+		size = (PixtyV2_I32){256, 256};
+	}
+	pGlCtx->frameSize = size;
+	glGenFramebuffers(1, &pGlCtx->frameBuf);
+	glBindFramebuffer(GL_FRAMEBUFFER, pGlCtx->frameBuf);
+	glGenTextures(1, &pGlCtx->targetTex);
+	glBindTexture(GL_TEXTURE_2D, pGlCtx->targetTex);
+	glTexImage2D(
+		GL_TEXTURE_2D,
+		0,
+		GL_RGB,
+		size.d[0],
+		size.d[1],
+		0,
+		GL_RGB,
+		GL_UNSIGNED_BYTE,
+		NULL
+	);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glGenRenderbuffers(1, &pGlCtx->depthBuf);
+	glBindRenderbuffer(GL_RENDERBUFFER, pGlCtx->depthBuf);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, size.d[0], size.d[1]);
+	glFramebufferRenderbuffer(
+		GL_FRAMEBUFFER,
+		GL_DEPTH_ATTACHMENT,
+		GL_RENDERBUFFER,
+		pGlCtx->depthBuf
+	);
+	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, pGlCtx->targetTex, 0);
+	glDrawBuffers(1, (GLenum[]){GL_COLOR_ATTACHMENT0});
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+		""
+	);
+	return err;
+}
+
+static
+void frameBufDestroy(GlCtx *pGlCtx) {
+	glDeleteRenderbuffers(1, &pGlCtx->depthBuf);
+	glDeleteTextures(1, &pGlCtx->targetTex);
+	glDeleteFramebuffers(1, &pGlCtx->frameBuf);
+}
+
+static
 PixtyM4x4 perspective(double yFov, double aspect, double zNear, double zFar) {
 	float f = 1.0f / tanf(yFov / 2.0f);
 	return (PixtyM4x4) {
@@ -320,11 +373,13 @@ PixErr draw(
 	PixtyV2_I32 windowSize
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
-	glClearColor(.2f, .2f, .2f, 1.0f);
+	glBindFramebuffer(GL_FRAMEBUFFER, pGlCtx->frameBuf);
+	glViewport(0, 0, pGlCtx->frameSize.d[0], pGlCtx->frameSize.d[1]);
+	glClearColor(.1f, .1f, .1f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glUseProgram(pGlCtx->prog);
 
-	float aspect = (F32)windowSize.d[0] / (F32)windowSize.d[1];
+	float aspect = (F32)pGlCtx->frameSize.d[0] / (F32)pGlCtx->frameSize.d[1];
 	float zNear = .001f;
 	float zFar = 100.0f;
 	DrawArgs drawArgs = {
@@ -355,6 +410,9 @@ PixErr draw(
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glEnable(GL_DEPTH_TEST);
 	glDrawElements(GL_TRIANGLES, triCount * 3, GL_UNSIGNED_INT, NULL);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glClearColor(.0f, .0f, .0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	err = carkGuiDraw();
 	PIX_ERR_RETURN_IFNOT(err, "");
 	SDL_ERR_RET(SDL_GL_SwapWindow(pWindow));
@@ -468,6 +526,9 @@ PixErr guiEventHandle(SDL_Window *pWindow, CarkGuiState *pGui, CarkGuiEvent even
 					false
 				);
 			}
+			break;
+		case CARK_GUI_EVENT_README:
+			SDL_OpenURL("https://www.github.com/pixenal/cark-vis");
 			break;
 		case CARK_GUI_EVENT_NONE:
 			PIX_ERR_ASSERT("", false);
@@ -1164,7 +1225,7 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		}
 
 		CarkGuiEventQueue guiQueue = {0};
-		err = carkGuiLayout(&session, windowSize, &guiQueue);
+		err = carkGuiLayout(&session, windowSize, &guiQueue, pGlCtx->targetTex);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		for (I32 i = 0; i < guiQueue.count; ++i) {
 			err = guiEventHandle(pWindow, &gui, guiQueue.queue[i]);
@@ -1174,6 +1235,15 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		err = update(&gui, &session, &view);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 
+		bool frameBufValid = glIsFramebuffer(pGlCtx->frameBuf);
+		if (!frameBufValid ||
+		    !pixmV2I32Equal(session.viewportSize, pGlCtx->frameSize)
+		) {
+			if (frameBufValid) {
+				frameBufDestroy(pGlCtx);
+			}
+			frameBufInit(pGlCtx, session.viewportSize);
+		}
 		err = draw(pWindow, &session, pGlCtx, &view, windowSize);
 		PIX_ERR_THROW_IFNOT(err, "draw failed", 0);
 		SDL_Delay(1);
@@ -1222,6 +1292,9 @@ int main(int argc, char **argv) {
 
 	PIX_ERR_CATCH(0, err, ;);
 	carkGuiDestroy();
+	if (glIsFramebuffer(glCtx.frameBuf)) {
+		frameBufDestroy(&glCtx);
+	}
 	if (glIsBuffer(glCtx.vbo)) {
 		glDeleteBuffers(1, &glCtx.vbo);
 	}

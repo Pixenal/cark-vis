@@ -19,4 +19,5 @@ typedef struct Session {
 	CarkInFile file;
 	CarkInFileInfo info;
 	GpuMesh renderMesh;
+	PixtyV2_I32 viewportSize;//TODO should this be in session?
 } Session;
