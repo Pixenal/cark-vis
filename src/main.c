@@ -2,6 +2,7 @@
 #include <SDL3/SDL_main.h>
 #include <GL/glew.h>
 #include <GL/gl.h>
+#include <plutosvg.h>
 #include <pixenals_error_utils.h>
 #include <pixenals_types.h>
 #include <pixenals_math_utils.h>
@@ -12,6 +13,7 @@
 #define CARK_PATH_LEN_MAX 4096
 #define PI 3.1415926536f
 #define VERT_POS_LOCATION 0
+#define BIN_PATH_LEN_MAX 16384
 
 typedef int16_t I16;
 typedef int32_t I32;
@@ -72,13 +74,6 @@ typedef struct Keys {
 	bool orbit;
 } Keys;
 
-typedef enum StageDataType {
-	STAGE_DATA_NONE,
-	STAGE_DATA_ARRAY,
-	STAGE_DATA_MESH,
-	STAGE_DATA_ENUM_COUNT
-} StageDataType;
-
 static PixalcFPtrs alloc = {
 	.fpMalloc = malloc,
 	.fpCalloc = calloc,
@@ -115,6 +110,9 @@ typedef struct Mesh {
 	V3_F32Arr pos;
 	bool tris;
 } Mesh;
+
+char *pAssetDir = NULL;
+I32 assetDirLen = 0;
 
 static
 void shaderLogPrint(GLuint shader) {
@@ -318,8 +316,7 @@ PixErr frameBufInit(GlCtx *pGlCtx, PixtyV2_I32 size) {
 		GL_TEXTURE_2D,
 		0,
 		GL_RGB,
-		size.d[0],
-		size.d[1],
+		size.d[0], size.d[1],
 		0,
 		GL_RGB,
 		GL_UNSIGNED_BYTE,
@@ -545,11 +542,15 @@ void sessionClear(Session *pSession) {
 	}
 	carkInFileDestroy(&alloc, &pSession->file);
 	pSession->info = (CarkInFileInfo){0};
+	pSession->activeStage = -1;
 }
 
 static
 void sessionDestroy(Session *pSession) {
 	sessionClear(pSession);
+	if (pSession->stageTypeArr.pArr) {
+		free(pSession->stageTypeArr.pArr);
+	}
 	if (pSession->logArr.pArr) {
 		free(pSession->logArr.pArr);
 	}
@@ -1152,18 +1153,20 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	pGui->pFileDialogPath = NULL;
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 
-	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
+	I32 stageCount = pSession->info.pStageArr->count;
+	PIXALC_DYN_ARR_RESIZE(StageDataType, &alloc, &pSession->stageTypeArr, stageCount);
+	for (I32 i = 0; i < stageCount; ++i) {
 		const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
 		if (!pStage->structCount) {
 			continue;
 		}
-		StageDataType type = STAGE_DATA_NONE;
+		pSession->stageTypeArr.pArr[i] = STAGE_DATA_NONE;
 		//TODO search through all structs in stage to find roots,
 		//currently only using struct at idx 0
 		DescIdx contains[CARK_DESC_ENUM_COUNT] = {0};
-		err = parseStructInfo(pSession, i, 0, &type, contains);
+		err = parseStructInfo(pSession, i, 0, pSession->stageTypeArr.pArr + i, contains);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
-		if (type != STAGE_DATA_MESH) {
+		if (pSession->stageTypeArr.pArr[i] != STAGE_DATA_MESH) {
 			continue;//TODO handle other types like ARRAY
 		}
 		Mesh mesh = {0};
@@ -1204,6 +1207,55 @@ PixErr update(CarkGuiState *pGui, Session *pSession, View *pView) {
 }
 
 static
+void pathFileAppend(char *pDir, I32 dirLen, const char *pName) {
+	I32 nameLen = strnlen(pName, ASSET_NAME_LEN_MAX);
+	PIX_ERR_ASSERT("", nameLen < ASSET_NAME_LEN_MAX);
+	memcpy(pDir + dirLen, pName, nameLen + 1);
+}
+
+static
+PixErr iconsLoad(CarkGuiState *pGui) {
+	PixErr err = PIX_ERR_SUCCESS;
+	const char folder[] = "icons/";
+	char *pIconPath = malloc(assetDirLen + sizeof(folder) + ASSET_NAME_LEN_MAX);
+	memcpy(pIconPath, pAssetDir, assetDirLen);
+	memcpy(pIconPath + assetDirLen, folder, sizeof(folder) - 1);
+	I32 dirLen = assetDirLen + sizeof(folder) - 1;
+
+	glGenTextures(ICON_COUNT, pGui->iconArr);
+	for (I32 i = 0; i < ICON_COUNT; ++i) {
+		pathFileAppend(pIconPath, dirLen, iconNames[i]);
+		plutosvg_document_t *pDoc = plutosvg_document_load_from_file(pIconPath, -1, -1);
+		PIX_ERR_RETURN_IFNOT_COND(err, pDoc, "");
+		plutovg_surface_t *pSurface = plutosvg_document_render_to_surface(
+			pDoc,
+			NULL,
+			ICON_SIZE, ICON_SIZE,
+			NULL,
+			NULL,
+			NULL
+		);
+		unsigned char *pData = plutovg_surface_get_data(pSurface);
+		//U8 *pDummy = calloc(ICON_SIZE * ICON_SIZE, 3);
+		glBindTexture(GL_TEXTURE_2D, pGui->iconArr[i]);
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_RGBA,
+			ICON_SIZE, ICON_SIZE,
+			0,
+			GL_RGBA,
+			GL_UNSIGNED_BYTE,
+			pData
+		);
+		//free(pDummy);
+		plutosvg_document_destroy(pDoc);
+		plutovg_surface_destroy(pSurface);
+	}
+	return err;
+}
+
+static
 PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
 
@@ -1211,21 +1263,24 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	CarkGuiState gui = {0};
 	View view = {.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 6.0f};
 	Keys keys = {0};
+	sessionClear(&session);
+	err = iconsLoad(&gui);
+	PIX_ERR_THROW_IFNOT(err, "", 0);
 	do {
 		PixtyV2_I32 windowSize = {0};
 		SDL_GetWindowSize(pWindow, windowSize.d, windowSize.d + 1);
 		SDL_Event event = {0};
+		bool exit = false;
 		while (SDL_PollEvent(&event)) {
-			bool exit = false;
 			err = eventHandle(windowSize, &event, &exit, &view, &keys);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			if (exit) {
-				return err;
+				goto mainLoopExit;
 			}
 		}
 
 		CarkGuiEventQueue guiQueue = {0};
-		err = carkGuiLayout(&session, windowSize, &guiQueue, pGlCtx->targetTex);
+		err = carkGuiLayout(&session, windowSize, &gui, &guiQueue, pGlCtx->targetTex);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		for (I32 i = 0; i < guiQueue.count; ++i) {
 			err = guiEventHandle(pWindow, &gui, guiQueue.queue[i]);
@@ -1249,6 +1304,7 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		SDL_Delay(1);
 	} while(true);
 
+mainLoopExit:
 	PIX_ERR_CATCH(0, err, ;);
 	while (gui.fileDialogActive) {
 		SDL_Delay(1);
@@ -1256,11 +1312,45 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	if (gui.pFileDialogPath) {
 		free(gui.pFileDialogPath);
 	}
+	if (glIsTexture(gui.iconArr[0])) {
+		glDeleteTextures(ICON_COUNT, gui.iconArr);
+	}
 	return err;
 }
 
 static
-void init() {
+PixErr assetDirGet(int argc, char **argv) {
+	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_RETURN_IFNOT_COND(err, argc, "binary path not passed");
+	I32 binPathLen = strnlen(argv[0], BIN_PATH_LEN_MAX);
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		binPathLen < BIN_PATH_LEN_MAX,
+		"binary path is too long"
+	);
+	I32 binDirLen = 0;
+	for (I32 i = binPathLen - 1; i >= 0; --i) {
+		if (argv[0][i] == '/' || argv[0][i] == '\\') {
+			binDirLen = i + 1;
+			break;
+		}
+	}
+	const char redirSuffix[] = "../../assets/";
+	assetDirLen = binDirLen + sizeof(redirSuffix) - 1;
+	PIX_ERR_ASSERT("", assetDirLen > 0);
+	pAssetDir = malloc(assetDirLen + 1);
+	memcpy(pAssetDir, argv[0], binDirLen);
+	memcpy(pAssetDir + binDirLen, redirSuffix, sizeof(redirSuffix));
+	printf("asset dir: %s\n", pAssetDir);
+	return err;
+}
+
+static
+PixErr init(int argc, char **argv) {
+	PixErr err = PIX_ERR_SUCCESS;
+	err = assetDirGet(argc, argv);
+	PIX_ERR_RETURN_IFNOT(err, "");
+
 	requiredTable[STAGE_DATA_MESH] = (Required){
 		.pArr = requiredMeshArr,
 		.size = sizeof(requiredMeshArr) / sizeof(CarkDesc)
@@ -1268,12 +1358,13 @@ void init() {
 
 	typeFromDesc[CARK_DESC_MESH] = STAGE_DATA_MESH;
 	typeFromDesc[CARK_DESC_FACE] = STAGE_DATA_MESH;
+	return err;
 }
 
 int main(int argc, char **argv) {
 	PixErr err = PIX_ERR_SUCCESS;
-
-	init();
+	err = init(argc, argv);
+	PIX_ERR_THROW_IFNOT(err, "", 0);
 
 	SDL_WindowFlags windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
 	SDL_Window *pWindow = SDL_CreateWindow("Cark Vis", 720, 480, windowFlags);
@@ -1312,6 +1403,9 @@ int main(int argc, char **argv) {
 	}
 	if (pWindow) {
 		SDL_DestroyWindow(pWindow);
+	}
+	if (pAssetDir) {
+		free(pAssetDir);
 	}
 	SDL_Quit();
 	return err != PIX_ERR_SUCCESS;

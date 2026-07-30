@@ -139,6 +139,10 @@ PixErr nameCpy(char *pDest, const char *pSrc) {
 	return err;
 }
 
+I32 carkTypeSizeGet(CarkType type) {
+	return typeSizeArr[type] / 8;
+}
+
 static
 I32 structSizeGet(const CarkStructInfo *pStruct) {
 	I32 size = 0;

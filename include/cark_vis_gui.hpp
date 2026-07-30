@@ -21,9 +21,11 @@ typedef struct CarkGuiEventQueue {
 	int32_t count;
 } CarkGuiEventQueue;
 
+//should this be in common.h? remove prefix if moved?
 typedef struct CarkGuiState {
 	volatile bool fileDialogActive;
 	char *pFileDialogPath;
+	uint32_t iconArr[ICON_COUNT];
 } CarkGuiState;
 
 #ifdef __cplusplus
@@ -34,6 +36,7 @@ PixErr carkGuiEvent(const void *pEvent);
 PixErr carkGuiLayout(
 	Session *pSession,
 	PixtyV2_I32 windowSize,
+	CarkGuiState *pGui,
 	CarkGuiEventQueue *pQueue,
 	uint32_t viewportTex
 );

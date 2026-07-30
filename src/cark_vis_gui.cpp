@@ -9,8 +9,16 @@
 #define IMGUI_ERR_THROW(a, message, handle)\
 	PIX_ERR_THROW_IFNOT_COND(err, !!(a), message, handle);
 
+typedef int8_t I8;
+typedef int16_t I16;
 typedef int32_t I32;
+typedef int64_t I64;
+typedef uint8_t U8;
+typedef uint16_t U16;
+typedef uint32_t U32;
+typedef uint64_t U64;
 typedef float F32;
+typedef double F64;
 
 PixErr carkGuiInit(void *pWindow, void *pSdlGlCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
@@ -45,9 +53,161 @@ void eventQueuePush(CarkGuiEventQueue *pQueue, CarkGuiEvent event) {
 	++pQueue->count;
 }
 
+static I8 stageIcon[] {
+	ICON_ARRAY,//none
+	ICON_ARRAY,//array
+	ICON_MESH//mesh
+};
+
+static I8 structIcon[] {
+	ICON_ARRAY,//none
+	ICON_ARRAY,//misc
+	ICON_ARROW,//idx
+	ICON_MESH,//mesh
+	ICON_TRI,//face
+	ICON_ARROW,//corner
+	ICON_VERT,//pos
+	ICON_VERT//uv
+};
+
+static
+void drawIcon(const CarkGuiState *pGui, Icon icon) {
+	ImGui::Image(
+		(void *)(intptr_t)pGui->iconArr[icon],
+		ImVec2{(F32)ICON_SIZE, (F32)ICON_SIZE},
+		ImVec2{.0f, .0f},
+		ImVec2{1.0f, 1.0f}
+	);
+}
+
+static
+void logRow(
+	I32 offset,
+	I32 idxInRange,
+	PixtyRange range,
+	const CarkInStructLog *pStructLog,
+	const CarkStruct *pStructInfo
+) {
+	ImGui::TableNextRow();
+	I32 byteIdx = (offset + idxInRange) * (pStructInfo->byteSize + sizeof(I32));
+	const U8 *pData = pStructLog->data.pArr + byteIdx;
+	F32 timestamp = *(F32 *)pData;
+	pData += sizeof(F32);
+	if (ImGui::TableSetColumnIndex(0)) {
+		ImGui::Text("%f", timestamp);
+	}
+	if (ImGui::TableSetColumnIndex(1)) {
+		ImGui::Text("%d", range.start + idxInRange);
+	}
+	for (I32 k = 0; k < pStructInfo->info.compCount; ++k) {
+		const CarkCompInfo *pCompInfo = pStructInfo->info.pCompArr + k;
+		const void *pVal = pData;
+		pData += carkTypeSizeGet(pCompInfo->type);
+		if (!ImGui::TableSetColumnIndex(2 + k)) {
+			continue;
+		}
+		switch (pCompInfo->type) {
+			case CARK_TYPE_I8:
+				ImGui::Text("%d", *(const I8 *)pVal);
+				break;
+			case CARK_TYPE_I16:
+				ImGui::Text("%d", *(const I16 *)pVal);
+				break;
+			case CARK_TYPE_I32:
+				ImGui::Text("%d", *(const I32 *)pVal);
+				break;
+			case CARK_TYPE_I64:
+				ImGui::Text("%ll", *(const I64 *)pVal);
+				break;
+			case CARK_TYPE_U8:
+				ImGui::Text("%u", *(const U8 *)pVal);
+				break;
+			case CARK_TYPE_U16:
+				ImGui::Text("%u", *(const U16 *)pVal);
+				break;
+			case CARK_TYPE_U32:
+				ImGui::Text("%u", *(const U32 *)pVal);
+				break;
+			case CARK_TYPE_U64:
+				ImGui::Text("%ull", *(const U64 *)pVal);
+				break;
+			case CARK_TYPE_F32:
+				ImGui::Text("%f", *(const F32 *)pVal);
+				break;
+			case CARK_TYPE_F64:
+				ImGui::Text("%f", *(const F64 *)pVal);
+				break;
+			default:
+				PIX_ERR_ASSERT("invalid component type", false);
+		}
+	}
+}
+
+static
+void logTable(const CarkInStructLog *pStructLog, const CarkStruct *pStructInfo) {
+	ImGuiTableColumnFlags columnFlags = ImGuiTableColumnFlags_None;
+	ImGui::TableSetupColumn("Timestamp", columnFlags);
+	ImGui::TableSetupColumn("Index", columnFlags);
+	for (I32 i = 0; i < pStructInfo->info.compCount; ++i) {
+		ImGui::TableSetupColumn(pStructInfo->info.pCompArr[i].name, columnFlags);
+	}
+	ImGui::TableHeadersRow();
+	I32 offset = 0;
+	for (I32 i = 0; i < pStructLog->rangeArr.count; ++i) {
+		PixtyRange range = pStructLog->rangeArr.pArr[i];
+		I32 rangeSize = range.end - range.start;
+		for (I32 j = 0; j < rangeSize; ++j) {
+			logRow(offset, j, range, pStructLog, pStructInfo);
+		}
+		offset += rangeSize;
+	}
+	ImGui::EndTable();
+}
+
+static
+void infoList(Session *pSession, CarkGuiState *pGui) {
+	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
+		const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
+		ImGuiTreeNodeFlags treeFlags =
+			ImGuiTreeNodeFlags_OpenOnArrow |
+			ImGuiTreeNodeFlags_SpanAvailWidth |
+			(pSession->activeStage == i ? ImGuiTreeNodeFlags_Selected : 0x0);
+		bool isOpen = ImGui::TreeNodeEx(
+			(void *)(intptr_t)i,
+			treeFlags,
+			"%s",
+			pStage->name
+		);
+		if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+			pSession->activeStage = i;
+		}
+		ImGui::SameLine();
+		drawIcon(pGui, (Icon)stageIcon[pSession->stageTypeArr.pArr[i]]);
+		if (isOpen) {
+			for (I32 j = 0; j < pStage->structCount; ++j) {
+				const CarkStructInfo *pStruct = &pStage->pStructArr[j].info;
+				bool active = j == pSession->activeStruct;
+				if (active) {
+					ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{.5f, .5f, 1.0f, 1.0f});
+				}
+				if (ImGui::Button(pStruct->name)) {
+					pSession->activeStruct = j;
+				}
+				ImGui::SameLine();
+				drawIcon(pGui, (Icon)structIcon[pStruct->desc]);
+				if (active) {
+					ImGui::PopStyleColor();
+				}
+			}
+			ImGui::TreePop();
+		}
+	}
+}
+
 PixErr carkGuiLayout(
 	Session *pSession,
 	PixtyV2_I32 windowSize,
+	CarkGuiState *pGui,
 	CarkGuiEventQueue *pQueue,
 	uint32_t viewportTex
 ) {
@@ -60,6 +220,10 @@ PixErr carkGuiLayout(
 	ImGui_ImplOpenGL3_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
 	ImGui::NewFrame();
+	
+	ImFont *pFont = ImGui::GetDefaultFont();
+	pFont->Scale = 1.2725f;
+	ImGui::PushFont(pFont);
 	
 	ImGuiID dockId = ImGui::GetID("Dockspace");
 	ImGuiViewport* pViewport = ImGui::GetMainViewport();
@@ -114,26 +278,37 @@ PixErr carkGuiLayout(
 			-(labelWidthBase < labelWidthMax ? labelWidthBase : labelWidthMax)
 		);
 		if (pSession->info.pStageArr) {
-			for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
-				const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
-				ImGui::Text("%s", pStage->name);
-				for (I32 j = 0; j < pStage->structCount; ++j) {
-					const CarkStructInfo *pStruct = &pStage->pStructArr[j].info;
-					ImGui::Text("  %s", pStruct->name);
-					for (I32 k = 0; k < pStruct->compCount; ++k) {
-						const CarkCompInfo *pComp = pStruct->pCompArr + k;
-						ImGui::Text("    %s", pComp->name);
-					}
-				}
-			}
+			infoList(pSession, pGui);
 		}
 		ImGui::Spacing();
+		ImGui::End();
 	}
-	ImGui::End();
 
 	if (ImGui::Begin("Log", NULL, ImGuiWindowFlags_None)) {
+		I32 stageIdx = pSession->activeStage;
+		if (stageIdx != -1 && pSession->info.pStageArr) {
+			PIX_ERR_ASSERT("", stageIdx < pSession->info.pStageArr->count);
+			const CarkInStageLog *pStageLog = pSession->logArr.pArr + stageIdx;
+			const CarkStage *pStageInfo = pSession->info.pStageArr->pArr + stageIdx;
+			PIX_ERR_ASSERT("", pSession->activeStruct < pStageInfo->structCount);
+			I32 structIdx = pSession->activeStruct;
+			const CarkInStructLog *pStructLog = pStageLog->structs.pArr + structIdx;
+			const CarkStruct *pStructInfo = pStageInfo->pStructArr + structIdx;
+			ImGuiTableFlags tableFlags =
+				ImGuiTableFlags_ScrollX |
+				ImGuiTableFlags_ScrollY |
+				ImGuiTableFlags_RowBg |
+				ImGuiTableFlags_BordersOuter |
+				ImGuiTableFlags_BordersV |
+				ImGuiTableFlags_Resizable |
+				ImGuiTableFlags_NoHostExtendX;
+			I32 columnCount = 2 + pStructInfo->info.compCount;
+			if (ImGui::BeginTable("Comp Log", columnCount, tableFlags, ImVec2{.0f, .0f})) {
+				logTable(pStructLog, pStructInfo);
+			}
+		}
+		ImGui::End();
 	}
-	ImGui::End();
 
 	if (ImGui::Begin("Timeline", NULL, ImGuiWindowFlags_None)) {
 		ImGui::Text("test a");
@@ -158,8 +333,6 @@ PixErr carkGuiLayout(
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{.0f, .0f});
 	if(ImGui::Begin("Viewport", NULL, windowFlags)) {
 		ImVec2 size = ImGui::GetWindowSize();
-		//size.x -= 20.0f;
-		//size.y -= 35.0f;
 		ImGui::Image(
 			(void *)(intptr_t)viewportTex,
 			size,
@@ -167,10 +340,11 @@ PixErr carkGuiLayout(
 			ImVec2{1.0f, .0f}
 		);
 		pSession->viewportSize = PixtyV2_I32{(I32)size.x, (I32)size.y};
+		ImGui::End();
 	}
-	ImGui::End();
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor();
+	ImGui::PopFont();
 	return err;
 }
 

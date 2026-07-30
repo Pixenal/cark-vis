@@ -98,11 +98,12 @@ set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory(extern/SDL EXCLUDE_FROM_ALL)
 add_subdirectory(extern/glew-cmake)
+add_subdirectory(extern/plutosvg)
 find_package(OpenGL REQUIRED)
 target_link_libraries(${PROJECT_IO} PRIVATE PixenalsAllocUtils PixenalsIoUtils)
 target_link_libraries(${PROJECT} PRIVATE
 	PixenalsAllocUtils PixenalsIoUtils PixenalsMathUtils PixenalsMeshUtils
-	SDL3::SDL3 libglew_static OpenGL::GL ${PROJECT_IO} ${PROJECT_GUI}
+	SDL3::SDL3 libglew_static OpenGL::GL plutosvg ${PROJECT_IO} ${PROJECT_GUI}
 )
 target_link_libraries(${PROJECT_GUI} PRIVATE PixenalsAllocUtils PixenalsIoUtils
 	SDL3::SDL3
@@ -117,7 +118,8 @@ target_include_directories(${PROJECT_IO} PUBLIC
 target_include_directories(${PROJECT} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
 	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
-	${CARK_PIX_MESH}/include extern/glew-cmake/include ${OPENGL_INCLUDE_DIR}
+	${CARK_PIX_MESH}/include extern/glew-cmake/include extern/plutosvg/source
+	${OPENGL_INCLUDE_DIR}
 )
 target_include_directories(${PROJECT_GUI} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include

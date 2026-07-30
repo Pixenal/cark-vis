@@ -1,9 +1,8 @@
 .ccls-cache/
-__pycache__/
 build/
-*.ppm
+lib/
+bin/
 documentation/
 compile_commands.json
 CMakeUserPresets.json
 .vscode/
-lib

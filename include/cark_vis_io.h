@@ -178,6 +178,9 @@ typedef struct CarkLog {
 	int32_t compCount;
 } CarkLog;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 PixErr carkOutInit(
 	const PixalcFPtrs *pAlloc,
 	const PixioFPtrs *pIo,
@@ -287,3 +290,7 @@ PixErr carkInFileLoadLog(
 void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog);
 void carkInFileDestroy(const PixalcFPtrs *pAlloc, CarkInFile *pFile);
 void carkInCtxDestroy(CarkInCtx *pCtx);
+int32_t carkTypeSizeGet(CarkType type);
+#ifdef __cplusplus
+}
+#endif
