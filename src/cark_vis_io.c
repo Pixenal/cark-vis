@@ -217,6 +217,10 @@ PixErr carkOutLogStart(
 	CarkLog *pLog
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
+	if (!pCtx->enabled) {
+		*pLog = (CarkLog){.pCtx = pCtx, .enabled = pCtx->enabled};
+		return err;
+	}
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
 		stageIdx >= 0 && stageIdx < pCtx->stageArr.count,
@@ -254,6 +258,14 @@ PixErr carkOutLogStart(
 
 PixErr carkOutLogComp(CarkLog *pLog, I32 compIdx, void *pVal) {
 	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		pLog->enabled == pLog->pCtx->enabled,
+		"logging was enabled/disabled during log entry, or state is corrupt"
+	);
+	if (!pLog->enabled) {
+		return err;
+	}
 	CarkThread *pThread = pLog->pCtx->pThreadArr + pLog->thread;
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
@@ -277,6 +289,14 @@ PixErr carkOutLogComp(CarkLog *pLog, I32 compIdx, void *pVal) {
 
 PixErr carkOutLogEnd(CarkLog *pLog) {
 	PixErr err = PIX_ERR_SUCCESS;
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		pLog->enabled == pLog->pCtx->enabled,
+		"logging was enabled/disabled during log entry, or state is corrupt"
+	);
+	if (!pLog->enabled) {
+		return err;
+	}
 	CarkThread *pThread = pLog->pCtx->pThreadArr + pLog->thread;
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
@@ -592,6 +612,9 @@ PixErr bufInflate(
 
 PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	PixErr err = PIX_ERR_SUCCESS;
+	if (!pCtx->enabled) {
+		return err;
+	}
 	PIX_ERR_RETURN_IFNOT_COND(err, stageIdx >= 0 && stageIdx < pCtx->stageArr.count, "");
 	CarkStage *pStage = pCtx->stageArr.pArr + stageIdx;
 	PixioByteArr stageData = {0};
@@ -755,6 +778,11 @@ PixErr encodeHeader(
 
 PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader) {
 	PixErr err = PIX_ERR_SUCCESS;
+	//TODO handle case where a stage didn't end, but had entries logged.
+	//(due to logging enable/disable toggle)
+	if (!pCtx->enabled) {
+		return err;
+	}
 	PixioByteArr topHeader = {0};
 	PixioByteArr header = {0};
 	CarkU8Arr headerCompress = {0};

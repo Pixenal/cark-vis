@@ -164,6 +164,7 @@ typedef struct CarkOutCtx {
 	PixalcLinAlloc structAlloc;
 	CarkU8Arr outBuf;
 	int32_t threadCount;
+	bool enabled;
 } CarkOutCtx;
 
 typedef struct CarkGraphInitCtx {
@@ -176,6 +177,7 @@ typedef struct CarkLog {
 	int32_t structIdx;
 	int32_t thread;
 	int32_t compCount;
+	bool enabled;
 } CarkLog;
 
 #ifdef __cplusplus
@@ -208,6 +210,15 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, int32_t stageIdx, bool compress);
 PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader);
 void carkOutClear(CarkOutCtx *pCtx);
 void carkOutDestroy(CarkOutCtx *pCtx);
+static inline
+void carkOutEnableSet(CarkOutCtx *pCtx, bool value) {
+	pCtx->enabled = value;
+}
+static inline
+bool carkOutEnableGet(CarkOutCtx *pCtx) {
+	return pCtx->enabled;
+}
+
 
 typedef struct CarkInLoadMem {
 	CarkU8Arr bufRaw;
