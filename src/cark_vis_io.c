@@ -16,14 +16,14 @@ typedef float F32;
 typedef enum FileSizeIdx {
 	FILE_NONE,
 	FILE_VERSION,
-	FILE_HEADER_SIZE,
-	FILE_HEADER_SIZE_RAW,
+	FILE_HEADER_SIZE_DEFL,
+	FILE_HEADER_SIZE_INFL,
 	FILE_STAGE_COUNT,
 	FILE_STRUCT_COUNT,
 	FILE_COMP_COUNT,
 	FILE_STAGE_BUF_START,
-	FILE_STAGE_BUF_COMPRESS_SIZE,
-	FILE_STAGE_BUF_SIZE,
+	FILE_STAGE_BUF_SIZE_DEFL,
+	FILE_STAGE_BUF_SIZE_INFL,
 	FILE_STAGE_STRUCT_COUNT,
 	FILE_STRUCT_DESC,
 	FILE_STRUCT_COMP_COUNT,
@@ -70,14 +70,14 @@ static const I8 typeSizeArr[] = {
 static
 void fileTypeSizeInit() {
 	fileSizeTable[FILE_VERSION] = 16;
-	fileSizeTable[FILE_HEADER_SIZE] = 32;
-	fileSizeTable[FILE_HEADER_SIZE_RAW] = 32;
+	fileSizeTable[FILE_HEADER_SIZE_DEFL] = 32;
+	fileSizeTable[FILE_HEADER_SIZE_INFL] = 32;
 	fileSizeTable[FILE_STAGE_COUNT] = 16;
 	fileSizeTable[FILE_STRUCT_COUNT] = 32;
 	fileSizeTable[FILE_COMP_COUNT] = 32;
 	fileSizeTable[FILE_STAGE_BUF_START] = 64;
-	fileSizeTable[FILE_STAGE_BUF_COMPRESS_SIZE] = 64;
-	fileSizeTable[FILE_STAGE_BUF_SIZE] = 64;
+	fileSizeTable[FILE_STAGE_BUF_SIZE_DEFL] = 64;
+	fileSizeTable[FILE_STAGE_BUF_SIZE_INFL] = 64;
 	fileSizeTable[FILE_STAGE_STRUCT_COUNT] = 16;
 	fileSizeTable[FILE_STRUCT_DESC] = 8;
 	fileSizeTable[FILE_STRUCT_COMP_COUNT] = 16;
@@ -245,7 +245,8 @@ PixErr carkOutLogStart(
 		.pCtx = pCtx,
 		.pStage = pStage,
 		.structIdx = structIdx,
-		.thread = thread
+		.thread = thread,
+		.enabled = pCtx->enabled
 	};
 	CarkStageLog *pStageLog = pThread->stageArr.pArr + pLog->pStage->idx;
 	CarkStructLog *pStructLog = pStageLog->pStructArr + structIdx;
@@ -744,8 +745,8 @@ PixErr encodeHeader(
 		pixioByteArrWriteStr(pAlloc, pHeader, pStage->name);
 		pixioByteArrWrite(pAlloc, pHeader, &pStage->bufStart, BITLEN(STAGE_BUF_START));
 		I64 compressSize = pStage->bufCompressSize;
-		pixioByteArrWrite(pAlloc, pHeader, &compressSize, BITLEN(STAGE_BUF_COMPRESS_SIZE));
-		pixioByteArrWrite(pAlloc, pHeader, &pStage->bufSize, BITLEN(STAGE_BUF_SIZE));
+		pixioByteArrWrite(pAlloc, pHeader, &compressSize, BITLEN(STAGE_BUF_SIZE_DEFL));
+		pixioByteArrWrite(pAlloc, pHeader, &pStage->bufSize, BITLEN(STAGE_BUF_SIZE_INFL));
 		pixioByteArrWrite(pAlloc, pHeader, &pStage->structCount, BITLEN(STAGE_STRUCT_COUNT));
 		for (I32 j = 0; j < pStage->structCount; ++j) {
 			const CarkStructInfo *pStructInfo = &pStage->pStructArr[j].info;
@@ -799,9 +800,9 @@ PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader)
 
 	err = encodeHeader(pCtx, &header, &headerCompress, compressHeader);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	err = pCtx->io.fpWrite(&file, &header.byteIdx, BITLEN(HEADER_SIZE) / 8);
+	err = pCtx->io.fpWrite(&file, &header.byteIdx, BITLEN(HEADER_SIZE_INFL) / 8);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	err = pCtx->io.fpWrite(&file, &headerCompress.count, BITLEN(HEADER_SIZE_RAW) / 8);
+	err = pCtx->io.fpWrite(&file, &headerCompress.count, BITLEN(HEADER_SIZE_DEFL) / 8);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 	err = pCtx->io.fpWrite(&file, headerCompress.pArr, headerCompress.count);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
@@ -955,8 +956,8 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 		CarkStage *pStage = pFile->stageArr.pArr + i;
 		pixioByteArrReadStr(pBuf, pStage->name, CARK_NAME_LEN_MAX);
 		pixioByteArrRead(pBuf, &pStage->bufStart, BITLEN(STAGE_BUF_START));
-		pixioByteArrRead(pBuf, &pStage->bufCompressSize, BITLEN(STAGE_BUF_COMPRESS_SIZE));
-		pixioByteArrRead(pBuf, &pStage->bufSize, BITLEN(STAGE_BUF_SIZE));
+		pixioByteArrRead(pBuf, &pStage->bufCompressSize, BITLEN(STAGE_BUF_SIZE_DEFL));
+		pixioByteArrRead(pBuf, &pStage->bufSize, BITLEN(STAGE_BUF_SIZE_INFL));
 		pixioByteArrRead(pBuf, &pStage->structCount, BITLEN(STAGE_STRUCT_COUNT));
 		pStage->pStructArr = pFile->structArr.pArr + structTotal;
 		structTotal += pStage->structCount;
@@ -1044,20 +1045,20 @@ PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile, CarkInFileInfo *pI
 	bool validFormat = !strncmp((char *)pMem->bufRaw.pArr, carkFormat, sizeof(carkFormat));
 	PIX_ERR_THROW_IFNOT_COND(err, validFormat && validVersion, "", 0);
 	I64 headerSize = 0;
-	I64 headerSizeRaw = 0;
-	err = pCtx->io.fpRead(&pFile->file, &headerSize, BITLEN(HEADER_SIZE) / 8);
+	I64 headerSizeDefl = 0;
+	err = pCtx->io.fpRead(&pFile->file, &headerSize, BITLEN(HEADER_SIZE_INFL) / 8);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	err = pCtx->io.fpRead(&pFile->file, &headerSizeRaw, BITLEN(HEADER_SIZE_RAW) / 8);
+	err = pCtx->io.fpRead(&pFile->file, &headerSizeDefl, BITLEN(HEADER_SIZE_DEFL) / 8);
 	PIX_ERR_THROW_IFNOT_COND(
 		err,
-		headerSizeRaw >= BITLEN(STAGE_COUNT),
+		headerSizeDefl >= BITLEN(STAGE_COUNT),
 		"read failed or header size is invalid",
 		0
 	);
-	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pMem->bufRaw, headerSizeRaw);
-	pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, headerSizeRaw);
+	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pMem->bufRaw, headerSizeDefl);
+	pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, headerSizeDefl);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	pMem->bufRaw.count = headerSizeRaw;
+	pMem->bufRaw.count = headerSizeDefl;
 	err = decodeHeader(pCtx, headerSize, pFile);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 	PIX_ERR_THROW_IFNOT_COND(
@@ -1066,7 +1067,7 @@ PixErr carkInFileLoadInfo(CarkInCtx *pCtx, CarkInFile *pFile, CarkInFileInfo *pI
 		"log is empty or corrupt",
 		0
 	);
-	pFile->headerSize = headerSizeRaw;
+	pFile->headerSize = headerSizeDefl;
 	if (pInfo) {
 		*pInfo = (CarkInFileInfo){.pStageArr = &pFile->stageArr};
 	}
@@ -1171,7 +1172,7 @@ PixErr loadLog(
 	);
 	I64 logStart =
 		CARK_TOP_HEADER_SIZE +
-		(BITLEN(HEADER_SIZE) + BITLEN(HEADER_SIZE_RAW)) / 8 +
+		(BITLEN(HEADER_SIZE_INFL) + BITLEN(HEADER_SIZE_DEFL)) / 8 +
 		pFile->headerSize;
 	pMem->bufRaw.count = pStage->bufCompressSize;
 	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pMem->bufRaw, pMem->bufRaw.count);
