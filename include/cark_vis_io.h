@@ -150,6 +150,8 @@ typedef struct CarkStageLogArr {
 
 typedef struct CarkThread {
 	char padHeader[CARK_CACHELINE_SIZE / 2];
+	int64_t timeFirst;//used to determine overall timeframe of log
+	int64_t timeLast;
 	CarkStageLogArr stageArr;
 	int32_t activeLogStage;
 	bool activeLog;
@@ -157,15 +159,14 @@ typedef struct CarkThread {
 } CarkThread;
 
 typedef struct CarkOutCtx {
+	CarkThread *pThreadArr;
 	PixalcFPtrs alloc;
 	PixioFPtrs io;
-	CarkThread *pThreadArr;
 	CarkStageArr stageArr;
 	PixalcLinAlloc compAlloc;
 	PixalcLinAlloc structAlloc;
 	CarkU8Arr outBuf;
 	int32_t threadCount;
-	int64_t timeStart;
 	bool enabled;
 } CarkOutCtx;
 
@@ -259,6 +260,8 @@ typedef struct CarkInStageLog {
 
 typedef struct CarkInFile {
 	PixioFile file;
+	int64_t timeStart;
+	int64_t duration;
 	CarkStageArr stageArr;
 	CarkStructArr structArr;
 	CarkCompInfoArr compArr;

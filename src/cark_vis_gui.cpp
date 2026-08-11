@@ -96,7 +96,7 @@ void logRow(
 	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {
 #ifdef WIN32
-		ImGui::Text("%d", (I32)timestamp);
+		ImGui::Text("%p", timestamp);
 #else
 		ImGui::Text("%l", timestamp);
 #endif

@@ -127,8 +127,7 @@ PixErr carkOutInit(
 		.alloc = *pAlloc,
 		.io = *pIo,
 		.threadCount = threadCount,
-		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread)),
-		.timeStart = -1
+		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread))
 	};
 	for (I32 i = 0; i < pCtx->threadCount; ++i) {
 		pCtx->pThreadArr[i].activeLogStage = -1;
@@ -220,7 +219,7 @@ PixErr carkOutStageInit(
 	return err;
 }
 
-//returns log-relative time in nanoseconds
+//returns unix time in microseconds
 static
 I64 timeGetRel(CarkOutCtx *pCtx) {
 	#ifdef WIN32
@@ -230,30 +229,24 @@ I64 timeGetRel(CarkOutCtx *pCtx) {
 		.LowPart = fileTime.dwLowDateTime,
 		.HighPart = fileTime.dwHighDateTime
 	};
-	I64 timestamp = (I64)largeInt.QuadPart * 100;
+	//0x19DB1DED53E8000 <- magic offset from windows epoch to unix epoch
+	return (I64)((largeInt.QuadPart - 0x19DB1DED53E8000) / 10);
 #else
 	struct timespec_t ts;
 	clock_gettime(CLOCK_REALTIME, &ts);
-	I64 timestamp = (I64)ts.tv_sec * 1000000000 + (I64)ts.tv_nsec;
+	return (I64)(ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
 #endif
-	I64 timeStart = pCtx->timeStart;
-	if (timeStart == -1) {
-		pixthAtomicCmpAndSwapI64(&pCtx->timeStart, timeStart, timestamp);
-		timeStart = pCtx->timeStart;
-	}
-	return timestamp - timeStart;//make relative to first log entry
 }
 
 static
 PixErr timestampValidate(I64 time) {
 	PixErr err = PIX_ERR_SUCCESS;
-	I64 timeMax = 2;
-	for (I32 i = 1; i < BITLEN(LOG_TIMESTAMP); ++i) {
+	U64 timeMax = 2;
+	for (I32 i = 1; i < BITLEN(LOG_TIMESTAMP) - 1; ++i) {
 		timeMax *= 2;
 	}
-	PIX_ERR_RETURN_IFNOT_COND(
-		err,
-		time >= 0 && time <= timeMax,
+	PIX_ERR_RETURN_IFNOT_COND(err,
+		time >= -(I64)timeMax && (U64)time < timeMax,
 		"time exceeds limit or is invalid"
 	);
 	return err;
@@ -304,7 +297,12 @@ PixErr carkOutLogStart(
 	const PixalcFPtrs *pAlloc = &pLog->pCtx->alloc;
 	pixioByteArrWrite(pAlloc, &pStructLog->data, &idx, BITLEN(LOG_IDX));
 	I64 timestamp = timeGetRel(pCtx);
-	timestampValidate(timestamp);
+	err = timestampValidate(timestamp);
+	PIX_ERR_RETURN_IFNOT(err, "");
+	if (!pCtx->pThreadArr[thread].timeFirst) {
+		pCtx->pThreadArr[thread].timeFirst = timestamp;
+	}
+	pCtx->pThreadArr[thread].timeLast = timestamp;
 	pixioByteArrWrite(pAlloc, &pStructLog->data, &timestamp, BITLEN(LOG_TIMESTAMP));
 	return err;
 }
@@ -787,6 +785,23 @@ PixErr encodeHeader(
 	PixErr err = PIX_ERR_SUCCESS;
 	const PixalcFPtrs *pAlloc = &pCtx->alloc;
 
+	{
+		I64 timestampFirst = 0;
+		I64 timestampLast = INT64_MAX;
+		for (I32 i = 0; i < pCtx->threadCount; ++i) {
+			const CarkThread *pThread = pCtx->pThreadArr + i;
+			if (pThread->timeFirst > timestampFirst) {
+				timestampFirst = pThread->timeFirst;
+			}
+			if (pThread->timeLast && pThread->timeLast < timestampLast) {
+				timestampLast = pThread->timeLast;
+			}
+		}
+		I64 duration = timestampLast - timestampFirst;
+		PIX_ERR_ASSERT("", duration >= 0);
+		pixioByteArrWrite(pAlloc, pHeader, &timestampFirst, BITLEN(LOG_TIMESTAMP));
+		pixioByteArrWrite(pAlloc, pHeader, &duration, BITLEN(LOG_TIMESTAMP));
+	}
 	pixioByteArrWrite(pAlloc, pHeader, &pCtx->stageArr.count, BITLEN(STAGE_COUNT));
 	I32 structTotal = pixalcLinAllocGetCount(&pCtx->structAlloc);
 	I32 compTotal = pixalcLinAllocGetCount(&pCtx->compAlloc);
@@ -895,7 +910,6 @@ void carkOutClear(CarkOutCtx *pCtx) {
 		}
 	}
 	pCtx->outBuf.count = 0;
-	pCtx->timeStart = -1;
 }
 
 void carkOutDestroy(CarkOutCtx *pCtx) {
@@ -1049,6 +1063,8 @@ PixErr decodeHeader(CarkInCtx *pCtx, I64 size, CarkInFile *pFile) {
 	);
 	PIX_ERR_RETURN_IFNOT(err, "");
 
+	pixioByteArrRead(&pMem->buf, &pFile->timeStart, BITLEN(LOG_TIMESTAMP));
+	pixioByteArrRead(&pMem->buf, &pFile->duration, BITLEN(LOG_TIMESTAMP));
 	err = decodeStages(pCtx, pFile);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	return err;
