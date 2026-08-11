@@ -52,6 +52,7 @@ typedef struct Session {
 	CarkInFileInfo info;
 	GpuMesh renderMesh;
 	PixtyV2_I32 viewportSize;//TODO should this be in session?
+	PixtyV2_I32 timelineSize;//TODO ^
 	I32 activeStage;
 	I32 activeStruct;
 } Session;

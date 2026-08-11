@@ -95,11 +95,7 @@ void logRow(
 	memcpy(&timestamp, pData, CARK_TIMESTAMP_SIZE);
 	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {
-#ifdef WIN32
 		ImGui::Text("%p", timestamp);
-#else
-		ImGui::Text("%l", timestamp);
-#endif
 	}
 	if (ImGui::TableSetColumnIndex(1)) {
 		ImGui::Text("%d", range.start + idxInRange);
@@ -222,7 +218,8 @@ PixErr carkGuiLayout(
 	PixtyV2_I32 windowSize,
 	CarkGuiState *pGui,
 	CarkGuiEventQueue *pQueue,
-	uint32_t viewportTex
+	uint32_t viewportTex,
+	uint32_t timelineTex
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 
@@ -325,7 +322,7 @@ PixErr carkGuiLayout(
 
 	if (ImGui::Begin("Timeline", NULL, ImGuiWindowFlags_None)) {
 		ImGui::Text("test a");
-
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{.0f, .0f});
 		ImVec2 size = ImGui::GetContentRegionAvail();
 		if (ImGui::BeginChild(
 			"stages",
@@ -333,9 +330,17 @@ PixErr carkGuiLayout(
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_None
 		)) {
-			ImGui::Text("test b");
+			ImVec2 size = ImGui::GetWindowSize();
+			ImGui::Image(
+				(void *)(intptr_t)timelineTex,
+				size,
+				ImVec2{.0f, 1.0f},
+				ImVec2{1.0f, .0f}
+			);
+			pSession->timelineSize = PixtyV2_I32{(I32)size.x, (I32)size.y};
 		}
 		ImGui::EndChild();
+		ImGui::PopStyleVar();
 	}
 	ImGui::End();
 

@@ -38,7 +38,8 @@ PixErr carkGuiLayout(
 	PixtyV2_I32 windowSize,
 	CarkGuiState *pGui,
 	CarkGuiEventQueue *pQueue,
-	uint32_t viewportTex
+	uint32_t viewportTex,
+	uint32_t timelineTex
 );
 PixErr carkGuiDraw();
 void carkGuiDestroy();

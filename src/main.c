@@ -19,6 +19,7 @@ typedef int16_t I16;
 typedef int32_t I32;
 typedef uint32_t U32;
 typedef float F32;
+typedef double F64;
 
 #define SDL_ERR_RET(a)\
 	if (!(a)) { \
@@ -46,27 +47,49 @@ typedef float F32;
 #define GL_ERR_THROW(a, message, handle) \
 	PIX_ERR_THROW_IFNOT_COND(err, !!(a), message, handle);
 
-typedef struct GlCtx {
-	SDL_GLContext pSdlCtx;
-	GLuint prog;
+typedef struct GpuGeo {
 	GLuint vao;
 	GLuint vbo;
 	GLuint ebo;
-	GLint vertPosLocation;
+} GpuGeo;
+
+typedef struct GpuUbo {
 	GLuint ubo;
 	GLuint uboIdx;
 	GLuint uboBind;
+	I32 size;
+} GpuUbo;
+
+typedef struct GpuFrame {
 	GLuint frameBuf;
 	GLuint depthBuf;
 	GLuint targetTex;
 	PixtyV2_I32 frameSize;
+} GpuFrame;
+
+typedef struct Viewport {
+	GLuint prog;
+	GpuGeo geo;
+	GpuUbo ubo;
+	GpuFrame frame;
+} Viewport;
+
+typedef struct Timeline {
+	GLuint prog;
+	GpuGeo geo;
+	GpuUbo ubo;
+	GpuFrame frame;
+} Timeline;
+
+typedef struct GlCtx {
+	SDL_GLContext pSdlCtx;
 } GlCtx;
 
 typedef struct View {
 	PixtyV2_F32 pan;
-	float yaw;
-	float pitch;
-	float camDist;
+	F32 yaw;
+	F32 pitch;
+	F32 camDist;
 } View;
 
 typedef struct Keys {
@@ -135,33 +158,164 @@ void shaderLogPrint(GLuint shader) {
 	free(pLog);
 }
 
-typedef struct DrawArgs {
+typedef struct ViewportDrawArgs {
 	PixtyM4x4 persp;
 	PixtyM4x4 view;
 	PixtyV2_F32 pan;
-	float yaw;
-	float pitch;
-	float camDist;
-} DrawArgs;
+	F32 yaw;
+	F32 pitch;
+	F32 camDist;
+} ViewportDrawArgs;
+
+typedef struct TimelineDrawArgs {
+	PixtyM4x4 ortho;
+	PixtyV2_F32 pos;
+	PixtyV2_F32 size;
+} TimelineDrawArgs;
 
 static
-PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
+PixErr shaderCompile(GLuint shader, const GLchar *pSrc) {
+	PixErr err = PIX_ERR_SUCCESS;
+	GLint glErr = false;
+	glShaderSource(shader, 1, &pSrc, NULL);
+	glCompileShader(shader);
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &glErr);
+	shaderLogPrint(shader);
+	if (!glErr) {
+		PIX_ERR_RETURN(err, "vert shader compilation failed");
+	}
+	return err;
+}
+
+static
+PixErr gpuProgInit(const GLchar *pVertSrc, const GLchar *pFragSrc, GLuint *pProg) {
 	PixErr err = PIX_ERR_SUCCESS;
 	GLint glErr = false;
 
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-	pGlCtx->pSdlCtx = SDL_GL_CreateContext(pWindow);
-	SDL_ERR_RET(pGlCtx->pSdlCtx);
-	GLEW_ERR_RET(glewInit());
-
 	GLuint vertShader = glCreateShader(GL_VERTEX_SHADER);
 	GLuint fragShader = glCreateShader(GL_FRAGMENT_SHADER);
-	const GLchar *vertShaderSrc = "\
+	err = shaderCompile(vertShader, pVertSrc);
+	PIX_ERR_RETURN_IFNOT(err, "");
+	err = shaderCompile(fragShader, pFragSrc);
+	PIX_ERR_RETURN_IFNOT(err, "");
+	GLuint prog = *pProg = glCreateProgram();
+	glAttachShader(prog, vertShader);
+	glAttachShader(prog, fragShader);
+	glLinkProgram(prog);
+	glGetProgramiv(prog, GL_LINK_STATUS, &glErr);
+	{
+		I32 bufSize = 0;
+		glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &bufSize);
+		if (bufSize > 0) {
+			char *pLog = malloc(bufSize);
+			I32 len = 0;
+			glGetProgramInfoLog(prog, bufSize, &len, pLog);
+			if (len > 0) {
+				printf("\nlink log:\n%s\n\n", pLog);
+			}
+		}
+		else {
+			printf("no link log to print\n");
+		}
+	}
+	glDeleteShader(vertShader);
+	glDeleteShader(fragShader);
+	PIX_ERR_RETURN_IFNOT_COND(err, glErr, "gl link failed");
+	return err;
+}
+
+static
+void gpuGeoInit(
+	I32 vecSize,
+	I32 posArrSize,
+	GLfloat *pPosArr,
+	I32 cornerArrSize,
+	GLuint *pCornerArr,
+	GpuGeo *pGeo
+) {
+	glGenVertexArrays(1, &pGeo->vao);
+	glBindVertexArray(pGeo->vao);
+	glGenBuffers(1, &pGeo->ebo);
+	glGenBuffers(1, &pGeo->vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pGeo->vbo);
+	glBufferData(GL_ARRAY_BUFFER, posArrSize, pPosArr, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pGeo->ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cornerArrSize, pCornerArr, GL_STATIC_DRAW);
+	I32 vecByteSize = vecSize * sizeof(GL_FLOAT);
+	glVertexAttribPointer(VERT_POS_LOCATION, vecSize, GL_FLOAT, false, vecByteSize, NULL);
+	glEnableVertexAttribArray(VERT_POS_LOCATION);
+}
+
+static
+void gpuUboInit(GLuint prog, const GLchar *pName, I32 size, I32 location, GpuUbo *pUbo) {
+	pUbo->size = size;
+	glGenBuffers(1, &pUbo->ubo);
+	glBindBuffer(GL_UNIFORM_BUFFER, pUbo->ubo);
+	glBufferData(GL_UNIFORM_BUFFER, size, NULL, GL_STATIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	pUbo->uboBind = location;
+	glBindBufferBase(GL_UNIFORM_BUFFER, pUbo->uboBind, pUbo->ubo);
+	pUbo->uboIdx = glGetUniformBlockIndex(prog, pName);
+	glUniformBlockBinding(prog, pUbo->uboIdx, pUbo->uboBind);
+}
+
+static
+PixErr timelineInit(Timeline *pTimeline) {
+	PixErr err = PIX_ERR_SUCCESS;
+	GLint glErr = false;
+
+	const GLchar vertShaderSrc[] = "\
+		#version 410 core\n\
+		layout (location = 0) in vec2 vertPos;\
+		layout (std140) uniform timelineDrawArgs {\
+			mat4 ortho;\
+			vec2 pos;\
+			vec2 size;\
+		};\
+		void main() {\
+			gl_Position = ortho * vec4(vertPos * size + pos, 1.0, 1.0);\
+		}\
+	";
+	const GLchar fragShaderSrc[] = "\
+		#version 410 core\n\
+		layout (location = 0) out vec3 fragColor;\
+		void main() {\
+			fragColor = vec3(1.0, .0, .0);\
+		}\
+	";
+	err = gpuProgInit(vertShaderSrc, fragShaderSrc, &pTimeline->prog);
+	PIX_ERR_RETURN_IFNOT(err, "");
+
+	GLfloat posArr[] = {
+		.0f, .0f,
+		1.0f, .0f,
+		1.0f, 1.0f,
+		.0f, 1.0f,
+	};
+
+	GLuint cornerArr[] = {
+		0, 1, 2,
+		2, 3, 0
+	};
+	gpuGeoInit(
+		2,
+		sizeof(posArr), posArr,
+		sizeof(cornerArr), cornerArr,
+		&pTimeline->geo
+	);
+	gpuUboInit(pTimeline->prog, "timelineDrawArgs", sizeof(TimelineDrawArgs), 1, &pTimeline->ubo);
+	return err;
+}
+
+static
+PixErr viewportInit(Viewport *pViewport) {
+	PixErr err = PIX_ERR_SUCCESS;
+	GLint glErr = false;
+
+	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
 		layout (location = 0) in vec3 vertPos;\
-		layout (std140) uniform drawArgs {\
+		layout (std140) uniform viewportDrawArgs {\
 			mat4 persp;\
 			mat4 view;\
 			vec2 pan;\
@@ -193,51 +347,17 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 			gl_Position = persp * pos;\
 		}\
 	";
-	const GLchar *fragShaderSrc = "\
+	const GLchar fragShaderSrc[] = "\
 		#version 410 core\n\
 		layout(location = 0) out vec3 fragColor;\
 		void main() {\
 			fragColor = vec3(1.0, .0, .0);\
 		}\
 	";
-	glShaderSource(vertShader, 1, &vertShaderSrc, NULL);
-	glCompileShader(vertShader);
-	glGetShaderiv(vertShader, GL_COMPILE_STATUS, &glErr);
-	shaderLogPrint(vertShader);
-	if (!glErr) {
-		PIX_ERR_RETURN(err, "vert shader compilation failed");
-	}
-	glShaderSource(fragShader, 1, &fragShaderSrc, NULL);
-	glCompileShader(fragShader);
-	glGetShaderiv(fragShader, GL_COMPILE_STATUS, &glErr);
-	shaderLogPrint(fragShader);
-	if (!glErr) {
-		PIX_ERR_RETURN(err, "frag shader compilation failed");
-	}
-	pGlCtx->prog = glCreateProgram();
-	glAttachShader(pGlCtx->prog, vertShader);
-	glAttachShader(pGlCtx->prog, fragShader);
-	glLinkProgram(pGlCtx->prog);
-	glGetProgramiv(pGlCtx->prog, GL_LINK_STATUS, &glErr);
-	{
-		I32 bufSize = 0;
-		glGetProgramiv(pGlCtx->prog, GL_INFO_LOG_LENGTH, &bufSize);
-		if (bufSize > 0) {
-			char *pLog = malloc(bufSize);
-			I32 len = 0;
-			glGetProgramInfoLog(pGlCtx->prog, bufSize, &len, pLog);
-			if (len > 0) {
-				printf("\nlink log:\n%s\n\n", pLog);
-			}
-		}
-		else {
-			printf("no link log to print\n");
-		}
-	}
-	glDeleteShader(vertShader);
-	glDeleteShader(fragShader);
-	PIX_ERR_RETURN_IFNOT_COND(err, glErr, "gl link failed");
+	err = gpuProgInit(vertShaderSrc, fragShaderSrc, &pViewport->prog);
+	PIX_ERR_RETURN_IFNOT(err, "");
 
+	//default cube
 	GLfloat posArr[] = {
 		-.5f, -.5f, -.5f,
 		.5f, -.5f, -.5f,
@@ -256,43 +376,97 @@ PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		3, 0, 4, 4, 7, 3,
 		4, 5, 6, 6, 7, 2
 	};
+	gpuGeoInit(
+		3,
+		sizeof(posArr), posArr,
+		sizeof(cornerArr), cornerArr,
+		&pViewport->geo
+	);
+	gpuUboInit(pViewport->prog, "viewportDrawArgs", sizeof(ViewportDrawArgs), 0, &pViewport->ubo);
+	return err;
+}
 
-	glGenVertexArrays(1, &pGlCtx->vao);
-	glBindVertexArray(pGlCtx->vao);
-	glGenBuffers(1, &pGlCtx->ebo);
-	glGenBuffers(1, &pGlCtx->vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, pGlCtx->vbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(posArr), posArr, GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pGlCtx->ebo);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cornerArr), cornerArr, GL_STATIC_DRAW);
-	I32 vec3Size = 3 * sizeof(GL_FLOAT);
-	glVertexAttribPointer(VERT_POS_LOCATION, 3, GL_FLOAT, false, vec3Size, NULL);
-	glEnableVertexAttribArray(VERT_POS_LOCATION);
+static
+void gpuGeoDestroy(GpuGeo *pGeo) {
+	if (glIsBuffer(pGeo->vbo)) {
+		glDeleteBuffers(1, &pGeo->vbo);
+	}
+	if (glIsBuffer(pGeo->ebo)) {
+		glDeleteBuffers(1, &pGeo->ebo);
+	}
+	if (glIsVertexArray(pGeo->vao)) {
+		glDeleteVertexArrays(1, &pGeo->vao);
+	}
+	*pGeo = (GpuGeo){0};
+}
 
-	glGenBuffers(1, &pGlCtx->ubo);
-	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
-	glBufferData(GL_UNIFORM_BUFFER, sizeof(DrawArgs), NULL, GL_STATIC_DRAW);
-	glBindBuffer(GL_UNIFORM_BUFFER, 0);
-	pGlCtx->uboBind = 0;
-	glBindBufferBase(GL_UNIFORM_BUFFER, pGlCtx->uboBind, pGlCtx->ubo);
-	pGlCtx->uboIdx = glGetUniformBlockIndex(pGlCtx->prog, "drawArgs");
-	glUniformBlockBinding(pGlCtx->prog, pGlCtx->uboIdx, pGlCtx->uboBind);
+static
+void gpuUboDestroy(GpuUbo *pUbo) {
+	if (glIsBuffer(pUbo->ubo)) {
+		glDeleteBuffers(1, &pUbo->ubo);
+	}
+	*pUbo = (GpuUbo){0};
+}
+
+static
+void gpuFrameDestroy(GpuFrame *pFrame) {
+	if (glIsFramebuffer(pFrame->frameBuf)) {
+		glDeleteRenderbuffers(1, &pFrame->depthBuf);
+		glDeleteTextures(1, &pFrame->targetTex);
+		glDeleteFramebuffers(1, &pFrame->frameBuf);
+	}
+	*pFrame = (GpuFrame){0};
+}
+
+static
+void timelineDestroy(Timeline *pTimeline) {
+	gpuFrameDestroy(&pTimeline->frame);
+	gpuUboDestroy(&pTimeline->ubo);
+	gpuGeoDestroy(&pTimeline->geo);
+	if (glIsProgram(pTimeline->prog)) {
+		glDeleteProgram(pTimeline->prog);
+	}
+	*pTimeline = (Timeline){0};
+}
+
+static
+void viewportDestroy(Viewport *pViewport) {
+	gpuFrameDestroy(&pViewport->frame);
+	gpuUboDestroy(&pViewport->ubo);
+	gpuGeoDestroy(&pViewport->geo);
+	if (glIsProgram(pViewport->prog)) {
+		glDeleteProgram(pViewport->prog);
+	}
+	*pViewport = (Viewport){0};
+}
+
+static
+PixErr initGl(SDL_Window *pWindow, GlCtx *pGlCtx) {
+	PixErr err = PIX_ERR_SUCCESS;
+	GLint glErr = false;
+
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	pGlCtx->pSdlCtx = SDL_GL_CreateContext(pWindow);
+	SDL_ERR_RET(pGlCtx->pSdlCtx);
+	GLEW_ERR_RET(glewInit());
 	return err;
 }
 
 static
 PixtyM4x4 frustum(
-	float left,
-	float right,
-	float bottom,
-	float top,
-	float zNear,
-	float zFar
+	F32 left,
+	F32 right,
+	F32 bottom,
+	F32 top,
+	F32 zNear,
+	F32 zFar
 ) {
-	float a = (right + left) / (right - left);
-	float b = (top + bottom) / (top - bottom);
-	float c = -(zFar + zNear) / (zFar - zNear);
-	float d = -(2.0f * zFar * zNear) / (zFar - zNear);
+	F32 a = (right + left) / (right - left);
+	F32 b = (top + bottom) / (top - bottom);
+	F32 c = -(zFar + zNear) / (zFar - zNear);
+	F32 d = -(2.0f * zFar * zNear) / (zFar - zNear);
 	return (PixtyM4x4) {
 		2.0f * zNear / (right - left), .0f, .0f, .0f,
 		.0f, 2.0f * zNear / (top - bottom), .0f, .0f,
@@ -302,16 +476,16 @@ PixtyM4x4 frustum(
 }
 
 static
-PixErr frameBufInit(GlCtx *pGlCtx, PixtyV2_I32 size) {
+PixErr frameBufInit(GpuFrame *pFrame, PixtyV2_I32 size) {
 	PixErr err = PIX_ERR_SUCCESS;
 	if (!size.d[0] || !size.d[1]) {
 		size = (PixtyV2_I32){256, 256};
 	}
-	pGlCtx->frameSize = size;
-	glGenFramebuffers(1, &pGlCtx->frameBuf);
-	glBindFramebuffer(GL_FRAMEBUFFER, pGlCtx->frameBuf);
-	glGenTextures(1, &pGlCtx->targetTex);
-	glBindTexture(GL_TEXTURE_2D, pGlCtx->targetTex);
+	pFrame->frameSize = size;
+	glGenFramebuffers(1, &pFrame->frameBuf);
+	glBindFramebuffer(GL_FRAMEBUFFER, pFrame->frameBuf);
+	glGenTextures(1, &pFrame->targetTex);
+	glBindTexture(GL_TEXTURE_2D, pFrame->targetTex);
 	glTexImage2D(
 		GL_TEXTURE_2D,
 		0,
@@ -324,16 +498,16 @@ PixErr frameBufInit(GlCtx *pGlCtx, PixtyV2_I32 size) {
 	);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glGenRenderbuffers(1, &pGlCtx->depthBuf);
-	glBindRenderbuffer(GL_RENDERBUFFER, pGlCtx->depthBuf);
+	glGenRenderbuffers(1, &pFrame->depthBuf);
+	glBindRenderbuffer(GL_RENDERBUFFER, pFrame->depthBuf);
 	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, size.d[0], size.d[1]);
 	glFramebufferRenderbuffer(
 		GL_FRAMEBUFFER,
 		GL_DEPTH_ATTACHMENT,
 		GL_RENDERBUFFER,
-		pGlCtx->depthBuf
+		pFrame->depthBuf
 	);
-	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, pGlCtx->targetTex, 0);
+	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, pFrame->targetTex, 0);
 	glDrawBuffers(1, (GLenum[]){GL_COLOR_ATTACHMENT0});
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
@@ -344,42 +518,54 @@ PixErr frameBufInit(GlCtx *pGlCtx, PixtyV2_I32 size) {
 }
 
 static
-void frameBufDestroy(GlCtx *pGlCtx) {
-	glDeleteRenderbuffers(1, &pGlCtx->depthBuf);
-	glDeleteTextures(1, &pGlCtx->targetTex);
-	glDeleteFramebuffers(1, &pGlCtx->frameBuf);
-}
-
-static
-PixtyM4x4 perspective(double yFov, double aspect, double zNear, double zFar) {
-	float f = 1.0f / tanf(yFov / 2.0f);
+PixtyM4x4 ortho(F64 left, F64 right, F64 bottom, F64 top, F64 zNear, F64 zFar) {
+	PixtyV3_F32 t = {
+		(F32)((right + left) / (right - left)), 
+		(F32)((top + bottom) / (top - bottom)),
+		(F32)((zFar + zNear) / (zFar - zNear))
+	};
 	return (PixtyM4x4) {
-		f / aspect, .0f, .0f, .0f,
-		.0f, f, .0f, .0f,
-		.0f, .0f, (zNear + zFar) / (zNear - zFar), -1.0f,
-		.0f, .0f, (2.0f * zNear * zFar) / (zNear - zFar), .0f
+		(F32)(2.0 / (right - left)), .0f, .0f, .0f,
+		.0f, (F32)(2.0 / (top - bottom)), .0f, .0f,
+		.0f, .0f, (F32)(-2.0 / (zFar - zNear)), .0f,
+		t.d[0], t.d[1], t.d[2], 1.0f
 	};
 }
 
 static
-PixErr draw(
-	SDL_Window *pWindow,
-	Session *pSession,
-	GlCtx *pGlCtx,
-	const View *pView,
-	PixtyV2_I32 windowSize
-) {
-	PixErr err = PIX_ERR_SUCCESS;
-	glBindFramebuffer(GL_FRAMEBUFFER, pGlCtx->frameBuf);
-	glViewport(0, 0, pGlCtx->frameSize.d[0], pGlCtx->frameSize.d[1]);
+PixtyM4x4 perspective(F64 yFov, F64 aspect, F64 zNear, F64 zFar) {
+	F64 f = 1.0f / tanf(yFov / 2.0f);
+	return (PixtyM4x4) {
+		(F32)(f / aspect), .0f, .0f, .0f,
+		.0f, (F32)f, .0f, .0f,
+		.0f, .0f, (F32)((zNear + zFar) / (zNear - zFar)), -1.0f,
+		.0f, .0f, (F32)((2.0 * zNear * zFar) / (zNear - zFar)), .0f
+	};
+}
+
+static
+void gpuFrameClear(const GpuFrame *pFrame) {
+	glBindFramebuffer(GL_FRAMEBUFFER, pFrame->frameBuf);
+	glViewport(0, 0, pFrame->frameSize.d[0], pFrame->frameSize.d[1]);
 	glClearColor(.1f, .1f, .1f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glUseProgram(pGlCtx->prog);
+}
 
-	float aspect = (F32)pGlCtx->frameSize.d[0] / (F32)pGlCtx->frameSize.d[1];
-	float zNear = .001f;
-	float zFar = 100.0f;
-	DrawArgs drawArgs = {
+static
+void gpuUboBind(const GpuUbo *pUbo, void *pData) {
+	glBindBuffer(GL_UNIFORM_BUFFER, pUbo->ubo);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, pUbo->size, pData);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+}
+
+static
+void drawViewport(const Session *pSession, const View *pView, const Viewport *pViewport) {
+	F32 aspect =
+		(F32)pViewport->frame.frameSize.d[0] /
+		(F32)pViewport->frame.frameSize.d[1];
+	F32 zNear = .001f;
+	F32 zFar = 100.0f;
+	ViewportDrawArgs drawArgs = {
 		.persp = perspective(PI / 4.0f, aspect, zNear, zFar),
 		.view = {
 			1.0f, .0f, .0f, .0f,
@@ -392,21 +578,58 @@ PixErr draw(
 		.pitch = pView->pitch,
 		.camDist = pView->camDist
 	};
-	glBindBuffer(GL_UNIFORM_BUFFER, pGlCtx->ubo);
-	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(DrawArgs), &drawArgs);
-	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 	I32 triCount;
 	if (pSession->renderMesh.triCount) {
 		glBindVertexArray(pSession->renderMesh.vao);
 		triCount = pSession->renderMesh.triCount;
 	}
 	else {
-		glBindVertexArray(pGlCtx->vao);
+		glBindVertexArray(pViewport->geo.vao);
 		triCount = 12;
 	}
+	gpuFrameClear(&pViewport->frame);
+	glUseProgram(pViewport->prog);
+	gpuUboBind(&pViewport->ubo, &drawArgs);
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glEnable(GL_DEPTH_TEST);
 	glDrawElements(GL_TRIANGLES, triCount * 3, GL_UNSIGNED_INT, NULL);
+}
+
+static
+void drawTimeline(const Session *pSession, const View *pView, const Timeline *pTimeline) {
+	F32 aspect =
+		(F32)pTimeline->frame.frameSize.d[0] /
+		(F32)pTimeline->frame.frameSize.d[1];
+	F32 zNear = .001f;
+	F32 zFar = 100.0f;
+	F32 size = 4.0f;
+	F32 bottom = size;
+	F32 right = size * aspect;
+	TimelineDrawArgs drawArgs = {
+		.ortho = ortho(-right, right, bottom, -bottom, zNear, zFar),
+		.pos = {-2.0f, 1.0f},
+		.size = {4.0f, 1.0f}
+	};
+	glBindVertexArray(pTimeline->geo.vao);
+	gpuFrameClear(&pTimeline->frame);
+	glUseProgram(pTimeline->prog);
+	gpuUboBind(&pTimeline->ubo, &drawArgs);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	glEnable(GL_DEPTH_TEST);
+	glDrawElements(GL_TRIANGLES, 2 * 3, GL_UNSIGNED_INT, NULL);
+}
+
+static
+PixErr draw(
+	SDL_Window *pWindow,
+	Session *pSession,
+	const View *pView,
+	Viewport *pViewport,
+	Timeline *pTimeline
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	drawViewport(pSession, pView, pViewport);
+	drawTimeline(pSession, pView, pTimeline);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glClearColor(.0f, .0f, .0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -442,7 +665,7 @@ PixErr eventHandle(
 				}
 				else {
 					motion = _(_(motion V2DIV fWindowSize) V2MULS 2.0f * PI);
-					float wrap = 2.0f * PI;
+					F32 wrap = 2.0f * PI;
 					pView->yaw = fmod(pView->yaw + motion.d[0], wrap);
 					pView->pitch = fmod(pView->pitch + motion.d[1], wrap);
 				}
@@ -1238,7 +1461,6 @@ PixErr iconsLoad(CarkGuiState *pGui) {
 			NULL
 		);
 		unsigned char *pData = plutovg_surface_get_data(pSurface);
-		//U8 *pDummy = calloc(ICON_SIZE * ICON_SIZE, 3);
 		glBindTexture(GL_TEXTURE_2D, pGui->iconArr[i]);
 		glTexImage2D(
 			GL_TEXTURE_2D,
@@ -1250,7 +1472,6 @@ PixErr iconsLoad(CarkGuiState *pGui) {
 			GL_UNSIGNED_BYTE,
 			pData
 		);
-		//free(pDummy);
 		plutosvg_document_destroy(pDoc);
 		plutovg_surface_destroy(pSurface);
 	}
@@ -1258,10 +1479,27 @@ PixErr iconsLoad(CarkGuiState *pGui) {
 }
 
 static
+void gpuFrameValidate(GpuFrame *pFrame, PixtyV2_I32 size) {
+	bool frameBufValid = glIsFramebuffer(pFrame->frameBuf);
+	if (!frameBufValid ||
+		!pixmV2I32Equal(size, pFrame->frameSize)
+	) {
+		if (frameBufValid) {
+			gpuFrameDestroy(pFrame);
+		}
+		frameBufInit(pFrame, size);
+	}
+}
+
+static
 PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	PixErr err = PIX_ERR_SUCCESS;
 
 	Session session = {0};
+	Viewport viewport = {0};
+	viewportInit(&viewport);
+	Timeline timeline = {0};
+	timelineInit(&timeline);
 	CarkGuiState gui = {0};
 	View view = {.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 6.0f};
 	Keys keys = {0};
@@ -1282,7 +1520,14 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		}
 
 		CarkGuiEventQueue guiQueue = {0};
-		err = carkGuiLayout(&session, windowSize, &gui, &guiQueue, pGlCtx->targetTex);
+		err = carkGuiLayout(
+			&session,
+			windowSize,
+			&gui,
+			&guiQueue,
+			viewport.frame.targetTex,
+			timeline.frame.targetTex
+		);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		for (I32 i = 0; i < guiQueue.count; ++i) {
 			err = guiEventHandle(pWindow, &gui, guiQueue.queue[i]);
@@ -1292,16 +1537,9 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		err = update(&gui, &session, &view);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 
-		bool frameBufValid = glIsFramebuffer(pGlCtx->frameBuf);
-		if (!frameBufValid ||
-		    !pixmV2I32Equal(session.viewportSize, pGlCtx->frameSize)
-		) {
-			if (frameBufValid) {
-				frameBufDestroy(pGlCtx);
-			}
-			frameBufInit(pGlCtx, session.viewportSize);
-		}
-		err = draw(pWindow, &session, pGlCtx, &view, windowSize);
+		gpuFrameValidate(&viewport.frame, session.viewportSize);
+		gpuFrameValidate(&timeline.frame, session.timelineSize);
+		err = draw(pWindow, &session, &view, &viewport, &timeline);
 		PIX_ERR_THROW_IFNOT(err, "draw failed", 0);
 		SDL_Delay(1);
 	} while(true);
@@ -1317,6 +1555,8 @@ mainLoopExit:
 	if (glIsTexture(gui.iconArr[0])) {
 		glDeleteTextures(ICON_COUNT, gui.iconArr);
 	}
+	viewportDestroy(&viewport);
+	timelineDestroy(&timeline);
 	return err;
 }
 
@@ -1385,21 +1625,6 @@ int main(int argc, char **argv) {
 
 	PIX_ERR_CATCH(0, err, ;);
 	carkGuiDestroy();
-	if (glIsFramebuffer(glCtx.frameBuf)) {
-		frameBufDestroy(&glCtx);
-	}
-	if (glIsBuffer(glCtx.vbo)) {
-		glDeleteBuffers(1, &glCtx.vbo);
-	}
-	if (glIsBuffer(glCtx.ebo)) {
-		glDeleteBuffers(1, &glCtx.ebo);
-	}
-	if (glIsVertexArray(glCtx.vao)) {
-		glDeleteVertexArrays(1, &glCtx.vao);
-	}
-	if (glIsProgram(glCtx.prog)) {
-		glDeleteProgram(glCtx.prog);
-	}
 	if (glCtx.pSdlCtx) {
 		SDL_GL_DestroyContext(glCtx.pSdlCtx);
 	}
