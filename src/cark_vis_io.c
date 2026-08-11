@@ -1,5 +1,14 @@
 #include <zlib.h>
 
+#ifdef WIN32
+#include <windows.h>
+#define EPOCH 
+#else
+#endif
+#include <math.h>
+
+#include <pixenals_thread_utils.h>
+
 #include <cark_vis_io.h>
 
 typedef int8_t I8;
@@ -7,7 +16,9 @@ typedef int16_t I16;
 typedef int32_t I32;
 typedef uint32_t U32;
 typedef int64_t I64;
+typedef uint64_t U64;
 typedef float F32;
+typedef double F64;
 
 #define CARK_WINDOW_BITS 31 //15 (+16 as using gzip)
 #define CARK_FILE_VERSION 100
@@ -96,7 +107,7 @@ void fileTypeSizeInit() {
 	fileSizeTable[FILE_LOG_RANGE_COUNT] = 32;
 	fileSizeTable[FILE_LOG_RANGE_STARTEND] = 32;
 	fileSizeTable[FILE_LOG_IDX] = 32;
-	fileSizeTable[FILE_LOG_TIMESTAMP] = 32;
+	fileSizeTable[FILE_LOG_TIMESTAMP] = CARK_TIMESTAMP_SIZE * 8;
 }
 
 PixErr carkOutInit(
@@ -116,7 +127,8 @@ PixErr carkOutInit(
 		.alloc = *pAlloc,
 		.io = *pIo,
 		.threadCount = threadCount,
-		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread))
+		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread)),
+		.timeStart = -1
 	};
 	for (I32 i = 0; i < pCtx->threadCount; ++i) {
 		pCtx->pThreadArr[i].activeLogStage = -1;
@@ -208,6 +220,45 @@ PixErr carkOutStageInit(
 	return err;
 }
 
+//returns log-relative time in nanoseconds
+static
+I64 timeGetRel(CarkOutCtx *pCtx) {
+	#ifdef WIN32
+	FILETIME fileTime = {0};
+	GetSystemTimePreciseAsFileTime(&fileTime);
+	ULARGE_INTEGER largeInt = {
+		.LowPart = fileTime.dwLowDateTime,
+		.HighPart = fileTime.dwHighDateTime
+	};
+	I64 timestamp = (I64)largeInt.QuadPart * 100;
+#else
+	struct timespec_t ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	I64 timestamp = (I64)ts.tv_sec * 1000000000 + (I64)ts.tv_nsec;
+#endif
+	I64 timeStart = pCtx->timeStart;
+	if (timeStart == -1) {
+		pixthAtomicCmpAndSwapI64(&pCtx->timeStart, timeStart, timestamp);
+		timeStart = pCtx->timeStart;
+	}
+	return timestamp - timeStart;//make relative to first log entry
+}
+
+static
+PixErr timestampValidate(I64 time) {
+	PixErr err = PIX_ERR_SUCCESS;
+	I64 timeMax = 2;
+	for (I32 i = 1; i < BITLEN(LOG_TIMESTAMP); ++i) {
+		timeMax *= 2;
+	}
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		time >= 0 && time <= timeMax,
+		"time exceeds limit or is invalid"
+	);
+	return err;
+}
+
 PixErr carkOutLogStart(
 	CarkOutCtx *pCtx,
 	I32 thread,
@@ -250,9 +301,10 @@ PixErr carkOutLogStart(
 	};
 	CarkStageLog *pStageLog = pThread->stageArr.pArr + pLog->pStage->idx;
 	CarkStructLog *pStructLog = pStageLog->pStructArr + structIdx;
-	I32 timestamp = 0;//TODO get actual time
 	const PixalcFPtrs *pAlloc = &pLog->pCtx->alloc;
 	pixioByteArrWrite(pAlloc, &pStructLog->data, &idx, BITLEN(LOG_IDX));
+	I64 timestamp = timeGetRel(pCtx);
+	timestampValidate(timestamp);
 	pixioByteArrWrite(pAlloc, &pStructLog->data, &timestamp, BITLEN(LOG_TIMESTAMP));
 	return err;
 }
@@ -843,6 +895,7 @@ void carkOutClear(CarkOutCtx *pCtx) {
 		}
 	}
 	pCtx->outBuf.count = 0;
+	pCtx->timeStart = -1;
 }
 
 void carkOutDestroy(CarkOutCtx *pCtx) {

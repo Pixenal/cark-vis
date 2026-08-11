@@ -78,10 +78,14 @@ else()
 endif()
 
 message("CARK_PIX_PATH is " ${CARK_PIX_PATH})
+set(CARK_PIX_THREAD "" ${CARK_PIX_PATH}/pixenals-thread-utils)
 set(CARK_PIX_ALLOC "" ${CARK_PIX_PATH}/pixenals-alloc-utils)
 set(CARK_PIX_IO "" ${CARK_PIX_PATH}/pixenals-io-utils)
 set(CARK_PIX_MATH "" ${CARK_PIX_PATH}/pixenals-math-utils)
 set(CARK_PIX_MESH "" ${CARK_PIX_PATH}/pixenals-mesh-utils)
+if (NOT TARGET PixenalsThreadUtils)
+	add_subdirectory(${CARK_PIX_THREAD} ${CARK_PIX_THREAD})
+endif()
 if (NOT TARGET PixenalsAllocUtils)
 	add_subdirectory(${CARK_PIX_ALLOC} ${CARK_PIX_ALLOC})
 endif()
@@ -100,7 +104,9 @@ add_subdirectory(extern/SDL EXCLUDE_FROM_ALL)
 add_subdirectory(extern/glew-cmake)
 add_subdirectory(extern/plutosvg)
 find_package(OpenGL REQUIRED)
-target_link_libraries(${PROJECT_IO} PRIVATE PixenalsAllocUtils PixenalsIoUtils)
+target_link_libraries(${PROJECT_IO} PRIVATE
+	PixenalsThreadUtils PixenalsAllocUtils PixenalsIoUtils
+)
 target_link_libraries(${PROJECT} PRIVATE
 	PixenalsAllocUtils PixenalsIoUtils PixenalsMathUtils PixenalsMeshUtils
 	SDL3::SDL3 libglew_static OpenGL::GL plutosvg ${PROJECT_IO} ${PROJECT_GUI}
@@ -113,7 +119,7 @@ target_include_directories(${PROJECT} PRIVATE include src)
 target_include_directories(${PROJECT_GUI} PRIVATE include src ${IMGUI})
 target_include_directories(${PROJECT_IO} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
-	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include
+	${CARK_PIX_THREAD}/include ${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include
 )
 target_include_directories(${PROJECT} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include

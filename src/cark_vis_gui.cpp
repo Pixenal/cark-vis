@@ -89,12 +89,17 @@ void logRow(
 	const CarkStruct *pStructInfo
 ) {
 	ImGui::TableNextRow();
-	I32 byteIdx = (offset + idxInRange) * (pStructInfo->byteSize + sizeof(I32));
+	I32 byteIdx = (offset + idxInRange) * (CARK_TIMESTAMP_SIZE + pStructInfo->byteSize);
 	const U8 *pData = pStructLog->data.pArr + byteIdx;
-	F32 timestamp = *(F32 *)pData;
-	pData += sizeof(F32);
+	I64 timestamp = 0;
+	memcpy(&timestamp, pData, CARK_TIMESTAMP_SIZE);
+	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {
-		ImGui::Text("%f", timestamp);
+#ifdef WIN32
+		ImGui::Text("%d", (I32)timestamp);
+#else
+		ImGui::Text("%l", timestamp);
+#endif
 	}
 	if (ImGui::TableSetColumnIndex(1)) {
 		ImGui::Text("%d", range.start + idxInRange);
@@ -117,7 +122,11 @@ void logRow(
 				ImGui::Text("%d", *(const I32 *)pVal);
 				break;
 			case CARK_TYPE_I64:
+#ifdef WIN32
 				ImGui::Text("%ll", *(const I64 *)pVal);
+#else
+				ImGui::Text("%l", *(const I64 *)pVal);
+#endif
 				break;
 			case CARK_TYPE_U8:
 				ImGui::Text("%u", *(const U8 *)pVal);
@@ -129,7 +138,11 @@ void logRow(
 				ImGui::Text("%u", *(const U32 *)pVal);
 				break;
 			case CARK_TYPE_U64:
+#ifdef WIN32
 				ImGui::Text("%ull", *(const U64 *)pVal);
+#else
+				ImGui::Text("%ul", *(const U64 *)pVal);
+#endif
 				break;
 			case CARK_TYPE_F32:
 				ImGui::Text("%f", *(const F32 *)pVal);

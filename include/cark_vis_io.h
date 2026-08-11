@@ -21,6 +21,7 @@
 #ifndef CARK_NAME_LEN_MAX
 #define CARK_NAME_LEN_MAX 64
 #endif
+#define CARK_TIMESTAMP_SIZE 8
 
 typedef struct CarkU8Arr {
 	uint8_t *pArr;
@@ -164,6 +165,7 @@ typedef struct CarkOutCtx {
 	PixalcLinAlloc structAlloc;
 	CarkU8Arr outBuf;
 	int32_t threadCount;
+	int64_t timeStart;
 	bool enabled;
 } CarkOutCtx;
 
@@ -301,6 +303,7 @@ PixErr carkInFileLoadLog(
 void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog);
 void carkInFileDestroy(const PixalcFPtrs *pAlloc, CarkInFile *pFile);
 void carkInCtxDestroy(CarkInCtx *pCtx);
+//retuns size of type in bits
 int32_t carkTypeSizeGet(CarkType type);
 #ifdef __cplusplus
 }

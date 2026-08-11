@@ -834,8 +834,8 @@ PixErr faceCornersGet(
 	}
 	for (I32 i = 0; i < faceRange.size; ++i) {
 		I32 idx = cornerOffset + faceRange.start - range.start + i;
-		I32 byteIdx = idx * (pCornerInfo->byteSize + sizeof(I32));
-		I32 vertIdx = *(I32 *)(pCornerLog->data.pArr + byteIdx + sizeof(F32));
+		I32 byteIdx = idx * (CARK_TIMESTAMP_SIZE + pCornerInfo->byteSize);
+		I32 vertIdx = *(I32 *)(pCornerLog->data.pArr + CARK_TIMESTAMP_SIZE + byteIdx);
 		I32 newIdx = 0;
 		PIXALC_DYN_ARR_ADD(I32, &alloc, pCornerBuf, newIdx);
 		pCornerBuf->pArr[newIdx] = vertIdx;
@@ -870,10 +870,12 @@ PixErr facePosGet(
 		for (I32 j = 0; j < pPosLog->rangeArr.count; ++j) {
 			PixtyRange vertRange = pPosLog->rangeArr.pArr[j];
 			if (vertIdx >= vertRange.start && vertIdx < vertRange.end) {
-				I32 byteIdx = (posOffset + vertIdx - vertRange.start) * (pPosInfo->byteSize + sizeof(I32));
+				I32 byteIdx =
+					(posOffset + vertIdx - vertRange.start) *
+					(CARK_TIMESTAMP_SIZE + pPosInfo->byteSize);
 				memcpy(
 					pos.d,
-					pPosLog->data.pArr + byteIdx + sizeof(F32),
+					pPosLog->data.pArr + CARK_TIMESTAMP_SIZE + byteIdx,
 					sizeof(PixtyV3_F32)
 				);
 				found = true;
@@ -957,14 +959,14 @@ PixErr meshFromLog(
 		PixtyRange range = pFaceLog->rangeArr.pArr[i];
 		I32 rangeSize = range.end - range.start;
 		for (I32 j = 0; j < rangeSize; ++j) {
-			I32 byteIdx = (faceOffset + j) * (pFaceInfo->byteSize + sizeof(I32));
+			I32 byteIdx = (faceOffset + j) * (CARK_TIMESTAMP_SIZE + pFaceInfo->byteSize);
 			const U8 *pData = pFaceLog->data.pArr + byteIdx;
 			//TODO assuming components before size comp are i32,
 			//put a func in io lib to get byte offset of a component idx
 			//(accounting for byte size of other components in struct)
 			FaceRange faceRange = {
-				.start = *(I32 *)(pData + sizeof(F32)),
-				.size = *(I32 *)(pData + sizeof(F32) + sizeCompIdx * sizeof(I32))
+				.start = *(I32 *)(pData + CARK_TIMESTAMP_SIZE),
+				.size = *(I32 *)(pData + CARK_TIMESTAMP_SIZE + sizeCompIdx * sizeof(I32))
 			};
 			err = faceCornersGet(pSession, pContains, faceRange, pCornerBuf);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
