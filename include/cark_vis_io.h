@@ -83,6 +83,23 @@ typedef struct CarkRef {
 	int32_t compIdx;
 } CarkRef;
 
+typedef struct CarkOverride {
+	int32_t val : 31;
+	int32_t override : 1;
+} CarkOverride;
+
+typedef struct CarkRefOverride {
+	CarkOverride stageIdx;
+	CarkOverride structIdx;
+	CarkOverride compIdx;
+	CarkOverride inst;
+} CarkRefOverride;
+
+typedef struct CarkRefOverrideArr {
+	CarkRefOverride *pArr;
+	int32_t count;
+} CarkRefOverrideArr;
+
 typedef struct CarkCompInfo {
 	char name[CARK_NAME_LEN_MAX + 1];
 	CarkRef precursorArr[CARK_PRECURSOR_COUNT_MAX];
@@ -132,9 +149,20 @@ typedef struct CarkStageArr {
 	int32_t count;
 } CarkStageArr;
 
-typedef struct CarkStructLog {
+typedef struct CarkInstLog {
 	PixioByteArr data;
+	PixioByteArr overrides;
 	int32_t count;
+} CarkInstLog;
+
+typedef struct CarkInstLogArr {
+	CarkInstLog *pArr;
+	int32_t size;
+	int32_t count;
+} CarkInstLogArr;
+
+typedef struct CarkStructLog {
+	CarkInstLogArr instArr;
 } CarkStructLog;
 
 typedef struct CarkStageLog {
@@ -178,8 +206,10 @@ typedef struct CarkLog {
 	CarkOutCtx *pCtx;
 	const CarkStage *pStage;
 	int32_t structIdx;
+	int32_t inst;
 	int32_t thread;
 	int32_t compCount;
+	int64_t overrideStart;
 	bool enabled;
 } CarkLog;
 
@@ -204,10 +234,16 @@ PixErr carkOutLogStart(
 	int32_t thread,
 	int32_t stageIdx,
 	int32_t structIdx,
+	int32_t inst,
 	int32_t idx,
 	CarkLog *pLog
 );
-PixErr carkOutLogComp(CarkLog *pLog, int32_t compIdx, void *pVal);
+PixErr carkOutLogComp(
+	CarkLog *pLog,
+	int32_t compIdx,
+	const CarkRefOverrideArr *pRefOverrideArr,
+	void *pVal
+);
 PixErr carkOutLogEnd(CarkLog *pLog);
 PixErr carkOutStageEnd(CarkOutCtx *pCtx, int32_t stageIdx, bool compress);
 PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader);
@@ -240,8 +276,11 @@ typedef struct CarkCompInfoArr {
 } CarkCompInfoArr;
 
 typedef struct CarkInStructLog {
-	PixtyRangeArr rangeArr;
-	PixtyU8Arr data;
+	int64_t dataIdx;
+	int32_t rangeIdx;
+	int32_t rangeCount;
+	int32_t count;
+	int32_t byteSize;
 	int32_t idx;
 } CarkInStructLog;
 
@@ -252,10 +291,11 @@ typedef struct CarkInStructLogArr {
 } CarkInStructLogArr;
 
 typedef struct CarkInStageLog {
-	//struct-arr is sparse, only including structs that were logged.
+	//struct-arr is sparse, containing only structs that were logged.
 	CarkInStructLogArr structs;
 	PixtyRangeArr rangeMem;
-	PixtyU8Arr dataMem;
+	PixtyU8Arr dataMem;//using single arr to make potential future compression easier
+	PixtyValidIdx64Arr overrideTable; 
 } CarkInStageLog;
 
 typedef struct CarkInFile {
@@ -290,7 +330,7 @@ PixErr carkInFileInfoGet(
 	CarkInFileInfo *pInfo
 );
 void carkInFileLogClear(CarkInStageLog *pLog);
-int32_t carkInStructLogCount(const CarkInStructLog *pLog);
+int32_t carkInStructLogCount(const CarkInStageLog *pLog, I32 structIdx);
 PixErr carkInLogIdx(
 	const CarkInStructLog *pLog,
 	const CarkStage *pStage,

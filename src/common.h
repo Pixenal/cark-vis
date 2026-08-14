@@ -45,12 +45,19 @@ typedef struct GpuMesh {
 	int32_t triCount;
 } GpuMesh;
 
+typedef struct GpuMeshArr {
+	GpuMesh *pArr;
+	PixtyValidIdx *pTable;
+	int32_t size;
+	int32_t count;
+} GpuMeshArr;
+
 typedef struct Session {
 	StageDataTypeArr stageTypeArr;
 	LogArr logArr;
 	CarkInFile file;
 	CarkInFileInfo info;
-	GpuMesh renderMesh;
+	GpuMeshArr meshArr;
 	PixtyV2_I32 viewportSize;//TODO should this be in session?
 	PixtyV2_I32 timelineSize;//TODO ^
 	I32 activeStage;

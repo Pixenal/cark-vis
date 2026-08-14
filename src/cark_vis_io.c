@@ -54,6 +54,9 @@ typedef enum FileSizeIdx {
 	FILE_LOG_RANGE_STARTEND,
 	FILE_LOG_IDX,
 	FILE_LOG_TIMESTAMP,
+	FILE_LOG_OVERRIDE_SIZE,
+	FILE_LOG_OVERRIDE_TOTAL,
+	FILE_LOG_OVERRIDE_COMP_TOTAL,
 	FILE_ENUM_COUNT
 } FileSizeIdx;
 
@@ -107,6 +110,9 @@ void fileTypeSizeInit() {
 	BITLEN(LOG_RANGE_COUNT) = 32;
 	BITLEN(LOG_RANGE_STARTEND) = 32;
 	BITLEN(LOG_IDX) = 32;
+	BITLEN(LOG_OVERRIDE_SIZE) = 64;
+	BITLEN(LOG_OVERRIDE_TOTAL) = 64;
+	BITLEN(LOG_OVERRIDE_COMP_TOTAL) = 32;
 	BITLEN(LOG_TIMESTAMP) = CARK_TIMESTAMP_SIZE * 8;
 }
 
@@ -151,6 +157,7 @@ PixErr nameCpy(char *pDest, const char *pSrc) {
 }
 
 I32 carkTypeSizeGet(CarkType type) {
+	PIX_ERR_ASSERT("", type > CARK_TYPE_NONE && type < CARK_TYPE_ENUM_COUNT);
 	return typeSizeArr[type] / 8;
 }
 
@@ -158,7 +165,7 @@ static
 I32 structSizeGet(const CarkStructInfo *pStruct) {
 	I32 size = 0;
 	for (I32 i = 0; i < pStruct->compCount; ++i) {
-		size += typeSizeArr[pStruct->pCompArr[i].type] / 8;
+		size += carkTypeSizeGet(pStruct->pCompArr[i].type) / 8;
 	}
 	return size;
 }
@@ -258,6 +265,7 @@ PixErr carkOutLogStart(
 	I32 stageIdx,
 	I32 structIdx,
 	I32 idx,
+	I32 inst,
 	CarkLog *pLog
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
@@ -289,13 +297,19 @@ PixErr carkOutLogStart(
 		.pCtx = pCtx,
 		.pStage = pStage,
 		.structIdx = structIdx,
+		.inst = inst,
 		.thread = thread,
 		.enabled = pCtx->enabled
 	};
 	CarkStageLog *pStageLog = pThread->stageArr.pArr + pLog->pStage->idx;
 	CarkStructLog *pStructLog = pStageLog->pStructArr + structIdx;
 	const PixalcFPtrs *pAlloc = &pLog->pCtx->alloc;
-	pixioByteArrWrite(pAlloc, &pStructLog->data, &idx, BITLEN(LOG_IDX));
+	if (inst >= pStructLog->instArr.count) {
+		PIXALC_DYN_ARR_RESIZE(CarkInstLog, pAlloc, &pStructLog->instArr, inst + 1);
+		pStructLog->instArr.count = inst + 1;
+	}
+	CarkInstLog *pInstLog = pStructLog->instArr.pArr + inst;
+	pixioByteArrWrite(pAlloc, &pInstLog->data, &idx, BITLEN(LOG_IDX));
 	I64 timestamp = timeGetRel(pCtx);
 	err = timestampValidate(timestamp);
 	PIX_ERR_RETURN_IFNOT(err, "");
@@ -303,11 +317,31 @@ PixErr carkOutLogStart(
 		pCtx->pThreadArr[thread].timeFirst = timestamp;
 	}
 	pCtx->pThreadArr[thread].timeLast = timestamp;
-	pixioByteArrWrite(pAlloc, &pStructLog->data, &timestamp, BITLEN(LOG_TIMESTAMP));
+	pixioByteArrWrite(pAlloc, &pInstLog->data, &timestamp, BITLEN(LOG_TIMESTAMP));
+	pLog->overrideStart = pInstLog->overrides.byteIdx;
+	pixioByteArrWrite(pAlloc, &pInstLog->overrides, &(I32){0}, sizeof(I32));
 	return err;
 }
 
-PixErr carkOutLogComp(CarkLog *pLog, I32 compIdx, void *pVal) {
+static
+void overrideWrite(
+	const PixalcFPtrs *pAlloc,
+	PixioByteArr *pByteArr,
+	CarkOverride override
+) {
+	pixioByteArrWrite(pAlloc, pByteArr, &(bool){override.override}, 1);
+	if (override.override) {
+		I16 val = override.val;//TODO use a macro for val bitlen, don't hardcode this
+		pixioByteArrWrite(pAlloc, pByteArr, &val, sizeof(val));
+	}
+}
+
+PixErr carkOutLogComp(
+	CarkLog *pLog,
+	I32 compIdx,
+	const CarkRefOverrideArr *pRefOverrideArr,
+	void *pVal
+) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
@@ -326,14 +360,35 @@ PixErr carkOutLogComp(CarkLog *pLog, I32 compIdx, void *pVal) {
 	PIX_ERR_ASSERT("invalid state", pThread->activeLogStage == pLog->pStage->idx);
 	const CarkStructInfo *pStructInfo = &pLog->pStage->pStructArr[pLog->structIdx].info;
 	const CarkCompInfo *pComp = pStructInfo->pCompArr + compIdx;
+	PIX_ERR_RETURN_IFNOT_COND(
+		err,
+		!pRefOverrideArr ||
+		!pRefOverrideArr->count ||
+		pRefOverrideArr->pArr && pRefOverrideArr->count == pComp->refCount,
+		"ref override count must match info"
+	);
 	CarkStructLog *pStructLog =
 		pThread->stageArr.pArr[pLog->pStage->idx].pStructArr + pLog->structIdx;
+	CarkInstLog *pInstLog = pStructLog->instArr.pArr + pLog->inst;
+
+	bool hasRefOverride = pRefOverrideArr && pRefOverrideArr->count;
+	pixioByteArrWrite(&pLog->pCtx->alloc, &pInstLog->overrides, &hasRefOverride, 1);
+	if (hasRefOverride) {
+		for (I32 i = 0; i < pRefOverrideArr->count; ++i) {
+			const CarkRefOverride *pRef = pRefOverrideArr->pArr + i;
+			overrideWrite(&pLog->pCtx->alloc, &pInstLog->overrides, pRef->stageIdx);
+			overrideWrite(&pLog->pCtx->alloc, &pInstLog->overrides, pRef->structIdx);
+			overrideWrite(&pLog->pCtx->alloc, &pInstLog->overrides, pRef->compIdx);
+			overrideWrite(&pLog->pCtx->alloc, &pInstLog->overrides, pRef->inst);
+		}
+	}
+
 	PIX_ERR_ASSERT(
 		"invalid component type",
 		pComp->type > CARK_TYPE_NONE && pComp->type < CARK_TYPE_ENUM_COUNT
 	);
-	I32 compByteSize = typeSizeArr[pComp->type];
-	pixioByteArrWrite(&pLog->pCtx->alloc, &pStructLog->data, pVal, compByteSize);
+	I32 compByteSize = carkTypeSizeGet(pComp->type);
+	pixioByteArrWrite(&pLog->pCtx->alloc, &pInstLog->data, pVal, compByteSize);
 	++pLog->compCount;
 	return err;
 }
@@ -360,7 +415,19 @@ PixErr carkOutLogEnd(CarkLog *pLog) {
 		pLog->compCount == pLog->pStage->pStructArr[pLog->structIdx].info.compCount,
 		"all components in a struct must be logged"
 	);
-	++pThread->stageArr.pArr[pLog->pStage->idx].pStructArr[pLog->structIdx].count;
+	CarkStageLog *pStageLog = pThread->stageArr.pArr + pLog->pStage->idx;
+	CarkInstLog *pInstLog =
+		pStageLog->pStructArr[pLog->structIdx].instArr.pArr + pLog->inst;
+	if (pInstLog->overrides.byteIdx == pLog->overrideStart + sizeof(I32)) {
+		//no overrides
+		pInstLog->overrides.byteIdx = pLog->overrideStart + 1;
+	}
+	else {
+		pixioByteArrAlign(&pInstLog->overrides);
+		U32 header = pInstLog->overrides.byteIdx - pLog->overrideStart << 1 | 0x1;
+		*(U32 *)&pInstLog->overrides.pArr[pLog->overrideStart] = header;
+	}
+	++pInstLog->count;
 	pThread->activeLog = false;
 	pThread->activeLogStage = -1;
 	return err;
@@ -409,7 +476,7 @@ void insertionSort(
 }
 
 static
-I32 structCountGet(
+I32 instCountGet(
 	const CarkOutCtx *pCtx,
 	const CarkStage *pStage,
 	I32 structIdx
@@ -418,7 +485,23 @@ I32 structCountGet(
 	for (I32 i = 0; i < pCtx->threadCount; ++i) {
 		const CarkStructLog *pStructLog =
 			pCtx->pThreadArr[i].stageArr.pArr[pStage->idx].pStructArr + structIdx;
-		total += pStructLog->count;
+		total += pStructLog->instArr.count;
+	}
+	return total;
+}
+
+static
+I32 structCountGet(
+	const CarkOutCtx *pCtx,
+	const CarkStage *pStage,
+	I32 structIdx,
+	I32 inst
+) {
+	I32 total = 0;
+	for (I32 i = 0; i < pCtx->threadCount; ++i) {
+		const CarkStructLog *pStructLog =
+			pCtx->pThreadArr[i].stageArr.pArr[pStage->idx].pStructArr + structIdx;
+		total += pStructLog->instArr.pArr[inst].count;
 	}
 	return total;
 }
@@ -435,18 +518,25 @@ const void *structDataGet(
 	const CarkOutCtx *pCtx,
 	const CarkStage *pStage,
 	I32 structIdx,
-	I32 idx
+	I32 inst,
+	I32 idx,
+	const CarkInstLog **ppInstLog
 ) {
 	PIX_ERR_ASSERT("", idx >= 0);
 	I32 total = 0;
 	for (I32 i = 0; i < pCtx->threadCount; ++i) {
 		const CarkStructLog *pStructLog =
 			pCtx->pThreadArr[i].stageArr.pArr[pStage->idx].pStructArr + structIdx;
+		PIX_ERR_ASSERT("", inst >= 0 && inst < pStructLog->instArr.count);
+		const CarkInstLog *pInstLog = pStructLog->instArr.pArr + inst;
 		I32 idxLocal = idx - total;
-		total += pStructLog->count;
+		total += pInstLog->count;
 		if (idx < total) {
+			if (ppInstLog) {
+				*ppInstLog = pInstLog;
+			}
 			I64 byteSize = structByteSize(pStage->pStructArr + structIdx, true);
-			return pStructLog->data.pArr + (I64)idxLocal * (I64)byteSize;
+			return pInstLog->data.pArr + (I64)idxLocal * (I64)byteSize;
 		}
 	}
 	PIX_ERR_ASSERT("idx out of bounds", false);
@@ -457,17 +547,32 @@ typedef struct SortCtx {
 	const CarkOutCtx *pCtx;
 	const CarkStage *pStage;
 	I32 structIdx;
+	I32 inst;
 } SortCtx;
 
 static
-Compare structIdxCmp(const void *pData, I32 aIdx, I32 bIdx) {
-	const SortCtx *pSortCtx = pData;
-	I32 structIdx = pSortCtx->structIdx;
-	I32 a = *(I32 *)structDataGet(pSortCtx->pCtx, pSortCtx->pStage, structIdx, aIdx);
-	I32 b = *(I32 *)structDataGet(pSortCtx->pCtx, pSortCtx->pStage, structIdx, bIdx);
+Compare structIdxCmp(const void *pArgsRaw, I32 aIdx, I32 bIdx) {
+	const SortCtx *pArgs = pArgsRaw;
+	I32 a = *(I32 *)structDataGet(
+		pArgs->pCtx,
+		pArgs->pStage,
+		pArgs->structIdx,
+		pArgs->inst,
+		aIdx,
+		NULL
+	);
+	I32 b = *(I32 *)structDataGet(
+		pArgs->pCtx,
+		pArgs->pStage,
+		pArgs->structIdx,
+		pArgs->inst,
+		bIdx,
+		NULL
+	);
 	return a >= b ? STUC_COMPARE_GREAT : STUC_COMPARE_LESS;
 }
 
+//TODO put this in pixio
 static
 void byteArrDestroy(const CarkOutCtx *pCtx, PixioByteArr *pArr) {
 	if (pArr->pArr) {
@@ -484,19 +589,52 @@ PixtyRange *newRangeGet(const CarkOutCtx *pCtx, PixtyRangeArr *pRangeBuf) {
 }
 
 static
-PixErr compileStructLogs(
+PixErr overrideTableInit(
+	CarkOutCtx *pCtx,
+	I32 stageIdx,
+	I32 structIdx,
+	I32 inst,
+	I64 *pTable
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	I32 idx = 0;
+	I32 offset = 0;
+	for (I32 i = 0; i < pCtx->threadCount; ++i) {
+		const CarkStageLog *pStageLog = pCtx->pThreadArr[i].stageArr.pArr + stageIdx;
+		const CarkInstLog *pInstLog = pStageLog->pStructArr[structIdx].instArr.pArr + inst;
+		for (I32 j = 0; j < pInstLog->count; ++j) {
+			pTable[idx] = offset;
+			PIX_ERR_RETURN_IFNOT_COND(err, offset < pInstLog->overrides.byteIdx, "");
+			const U8 *pStart = pInstLog->overrides.pArr + offset;
+			offset += pStart[0] ? (I32)(*(U32 *)pStart >> 1) : 1;
+		}
+	}
+	return err;
+}
+
+static
+PixErr compileInstLogs(
 	CarkOutCtx *pCtx,
 	const CarkStage *pStage,
 	I32 structIdx,
+	I32 inst,
 	I32 count,
 	PixioByteArr *pStageData,
 	PixtyRangeArr *pRangeBuf,
-	I64 *pDataTotal
+	I64 *pDataTotal,
+	I64 *pOverrideTotal,
+	I32 *pOverrideComp
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	const PixalcFPtrs *pAlloc = &pCtx->alloc;
 	PIX_ERR_ASSERT("", count > 0);
-	I32 *pIdxArrMem = pCtx->alloc.fpCalloc(count + 1, sizeof(I32));
+	I32 *pIdxArrMem = NULL;
+	PixioByteArr overrideBuf = {0};
+	I64 *pOverrideTable = pCtx->alloc.fpMalloc(count, sizeof(I64));
+	err = overrideTableInit(pCtx, pStage->idx, structIdx, inst, pOverrideTable);
+	PIX_ERR_THROW_IFNOT(err, "", 0);
+	
+	pIdxArrMem = pCtx->alloc.fpCalloc(count + 1, sizeof(I32));
 	I32 *pIdxArr = pIdxArrMem + 1;
 	insertionSort(
 		pIdxArr,
@@ -507,11 +645,11 @@ PixErr compileStructLogs(
 
 	pRangeBuf->count = 0;
 	PixtyRange *pRange = newRangeGet(pCtx, pRangeBuf);
-	pRange->start = *(I32 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[0]);
+	pRange->start = *(I32 *)structDataGet(pCtx, pStage, structIdx, inst, pIdxArr[0], NULL);
 	I32 idxPrev = pRange->start;
 	I32 idx = 0;
 	for (I32 i = 1; i < count; idxPrev = idx, ++i) {
-		idx = *(I32 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[i]);
+		idx = *(I32 *)structDataGet(pCtx, pStage, structIdx, inst, pIdxArr[i], NULL);
 		if (idx == idxPrev + 1) {
 			continue;
 		}
@@ -531,12 +669,75 @@ PixErr compileStructLogs(
 		pixioByteArrWrite(pAlloc, pStageData, &range.start, BITLEN(LOG_RANGE_STARTEND));
 		pixioByteArrWrite(pAlloc, pStageData, &range.end, BITLEN(LOG_RANGE_STARTEND));
 	}
+	I32 overrideOffset = 0;
 	for (I32 i = 0; i < count; ++i) {
-		void *pStart =
-			(U8 *)structDataGet(pCtx, pStage, structIdx, pIdxArr[i]) + structIdxBytes;
+		const CarkInstLog *pInstLog = NULL;
+		const U8 *pStart =
+			(const U8 *)structDataGet(pCtx, pStage, structIdx, inst, pIdxArr[i], &pInstLog) +
+			structIdxBytes;
 		pixioByteArrWrite(pAlloc, pStageData, pStart, byteSize * 8);
+		const U8 *pOverrideStart = pInstLog->overrides.pArr + pOverrideTable[pIdxArr[i]];
+		if (pOverrideStart[0]) {
+			//has ref override(s)
+			I32 bitSize = (I32)(*(U32 *)pOverrideStart >> 1) * 8 - sizeof(U32);
+			pixioByteArrWrite(pAlloc, &overrideBuf, &(bool){true}, 8);
+			pixioByteArrWrite(pAlloc, &overrideBuf, pOverrideStart + sizeof(U32), bitSize);
+			pixioByteArrAlign(&overrideBuf);
+			*pOverrideTotal += (I64)bitSize;
+			*pOverrideComp += bitSize / (17);
+		}
+		else {
+			pixioByteArrWrite(pAlloc, &overrideBuf, pOverrideStart, 8);
+			//not included in override-total, as it won't be copied to mem during fileload
+		}
 	}
+	PIX_ERR_ASSERT("", overrideBuf.byteIdx && !overrideBuf.nextBitIdx);
+	pixioByteArrWrite(pAlloc, pStageData, &overrideBuf.byteIdx, BITLEN(LOG_OVERRIDE_SIZE));
+	pixioByteArrWrite(pAlloc, pStageData, overrideBuf.pArr, overrideBuf.byteIdx);
 	*pDataTotal += (I64)byteSize * (I64)count;
+	PIX_ERR_CATCH(0, err, ;);
+	pAlloc->fpFree(pOverrideTable);
+	byteArrDestroy(pCtx, &overrideBuf);
+	if (pIdxArrMem) {
+		pAlloc->fpFree(pIdxArrMem);
+	}
+	return err;
+}
+
+static
+PixErr compileStructLogs(
+	CarkOutCtx *pCtx,
+	const CarkStage *pStage,
+	I32 structIdx,
+	PixioByteArr *pStageData,
+	PixtyRangeArr *pRangeBuf,
+	I32 *pRangeTotal,
+	I64 *pDataTotal,
+	I64 *pOverrideTotal,
+	I32 *pOverrideComp
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	I32 instCount = instCountGet(pCtx, pStage, structIdx);
+	for (I32 i = 0; i < instCount; ++i) {
+		I32 structCount = structCountGet(pCtx, pStage, structIdx, i);
+		if (!structCount) {
+			return err;
+		}
+		err = compileInstLogs(
+			pCtx,
+			pStage,
+			structIdx,
+			i,
+			structCount,
+			pStageData,
+			pRangeBuf,
+			pDataTotal,
+			pOverrideTotal,
+			pOverrideComp
+		);
+		PIX_ERR_RETURN_IFNOT(err, "");
+		*pRangeTotal += pRangeBuf->count;
+	}
 	return err;
 }
 
@@ -582,10 +783,7 @@ void *outBufResize(const PixalcFPtrs *pAlloc, void *pUserData, I32 minSize) {
 static
 void *outByteArrResize(const PixalcFPtrs *pAlloc, void *pUserData, I32 minSize) {
 	PixioByteArr *pOutBuf = pUserData;
-	if (pOutBuf->nextBitIdx) {
-		++pOutBuf->byteIdx;
-		pOutBuf->nextBitIdx = 0;
-	}
+	pixioByteArrAlign(pOutBuf);
 	PIXALC_DYN_ARR_RESIZE(U8, pAlloc, pOutBuf, pOutBuf->byteIdx + minSize);
 	return pOutBuf->pArr + pOutBuf->byteIdx;
 }
@@ -661,6 +859,18 @@ PixErr bufInflate(
 	return err;
 }
 
+static
+void stageLogDestroy(CarkOutCtx *pCtx, CarkStageLog *pStageLog) {
+	for (I32 i = 0 ; i < pStageLog->structCount; ++i) {
+		for (I32 j = 0; j < pStageLog->pStructArr[i].instArr.count; ++j) {
+			CarkInstLog *pInstLog = pStageLog->pStructArr[i].instArr.pArr + j;
+			byteArrDestroy(pCtx, &pInstLog->data);
+			byteArrDestroy(pCtx, &pInstLog->overrides);
+			pInstLog->count = 0;
+		}
+	}
+}
+
 PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	PixErr err = PIX_ERR_SUCCESS;
 	if (!pCtx->enabled) {
@@ -672,6 +882,8 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	PixtyRangeArr rangeBuf = {0};//TODO move mem into out-ctx for reuse?
 	I32 rangeTotal = 0;
 	I64 dataTotal = 0;
+	I64 overrideTotal = 0;
+	I32 overrideComp = 0;
 	I32 headerSize = (
 		BITLEN(LOG_STRUCT_COUNT) +
 		BITLEN(LOG_RANGE_TOTAL) +
@@ -681,22 +893,19 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	stageData.byteIdx += headerSize;
 	I32 structsLogged = 0;
 	for (I32 i = 0 ; i < pStage->structCount; ++i) {
-		I32 structCount = structCountGet(pCtx, pStage, i);
-		if (!structCount) {
-			continue;
-		}
-		++structsLogged;
 		err = compileStructLogs(
 			pCtx,
 			pStage,
 			i,
-			structCount,
 			&stageData,
 			&rangeBuf,
-			&dataTotal
+			&rangeTotal,
+			&dataTotal,
+			&overrideTotal,
+			&overrideComp
 		);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
-		rangeTotal += rangeBuf.count;
+		++structsLogged;
 	}
 	I32 countBytes = BITLEN(LOG_STRUCT_COUNT) / 8;
 	I32 rangeTotalBytes = BITLEN(LOG_RANGE_TOTAL) / 8;
@@ -705,17 +914,18 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	memcpy(stageData.pArr + headerPtr, &rangeTotal, rangeTotalBytes);
 	headerPtr += rangeTotalBytes;
 	memcpy(stageData.pArr + headerPtr, &dataTotal, BITLEN(LOG_DATA_TOTAL) / 8);
+	headerPtr += BITLEN(LOG_DATA_TOTAL) / 8;
+	memcpy(stageData.pArr + headerPtr, &overrideTotal, BITLEN(LOG_OVERRIDE_TOTAL) / 8);
+	headerPtr += BITLEN(LOG_OVERRIDE_TOTAL) / 8;
+	memcpy(stageData.pArr + headerPtr, &overrideComp, BITLEN(LOG_OVERRIDE_COMP_TOTAL) / 8);
 	PIX_ERR_CATCH(1, err, ;);
 	if (rangeBuf.pArr) {
 		pCtx->alloc.fpFree(rangeBuf.pArr);
 	}
 	PIX_ERR_THROW_IFNOT(err, "", 0);
-	for (I32 i = 0 ; i < pStage->structCount; ++i) {
-		for (I32 j = 0; j < pCtx->threadCount; ++j) {
-			CarkStageLog *pStageLog = pCtx->pThreadArr[j].stageArr.pArr + pStage->idx;
-			byteArrDestroy(pCtx, &pStageLog->pStructArr[i].data);
-			pStageLog->pStructArr[i].count = 0;
-		}
+	for (I32 i = 0; i < pCtx->threadCount; ++i) {
+		CarkStageLog *pStageLog = pCtx->pThreadArr[i].stageArr.pArr + pStage->idx;
+		stageLogDestroy(pCtx, pStageLog);
 	}
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 
@@ -823,10 +1033,7 @@ PixErr encodeHeader(
 			PIX_ERR_RETURN_IFNOT(err, "");
 		}
 	}
-	if (pHeader->nextBitIdx) {
-		++pHeader->byteIdx;
-		pHeader->nextBitIdx = 0;
-	}
+	pixioByteArrAlign(pHeader);
 	z_stream zStream = {0};
 	err = bufDeflate(
 		pCtx,
@@ -891,16 +1098,6 @@ PixErr carkOutFileSave(CarkOutCtx *pCtx, const char *pPath, bool compressHeader)
 		pCtx->alloc.fpFree(topHeader.pArr);
 	}
 	return err;
-}
-
-static
-void stageLogDestroy(CarkOutCtx *pCtx, CarkStageLog *pStageLog) {
-	for (I32 i = 0; i < pStageLog->structCount; ++i) {
-		CarkStructLog *pStructLog = pStageLog->pStructArr + i;
-		if (pStructLog->count) {
-			byteArrDestroy(pCtx, &pStructLog->data);
-		}
-	}
 }
 
 void carkOutClear(CarkOutCtx *pCtx) {
@@ -1159,6 +1356,53 @@ PixErr carkInFileInfoGet(
 	return err;
 }
 
+//passing NULL for pOverride will progress byte-arr idx while ignoring content
+static
+void decodeOverride(PixioByteArr *pBuf, CarkOverride *pOverride) {
+	bool hasOverride = false;
+	pixioByteArrRead(pBuf, &hasOverride, 1);
+	I16 val = 0;
+	if (hasOverride) {
+		pixioByteArrRead(pBuf, &val, 16);
+	}
+	if (pOverride) {
+		*pOverride = (CarkOverride){.override = hasOverride, .val = val};
+	}
+}
+
+static
+void loadRefOverrides(
+	CarkInStageLog *pLog,
+	CarkInLoadMem *pMem,
+	I64 overrideStart,
+	I64 overrideSize
+) {
+	I64 overrideEnd = pMem->buf.byteIdx + overrideSize;
+	PIX_ERR_ASSERT("", !pMem->buf.nextBitIdx && overrideEnd <= pMem->buf.size);
+	I64 offset = overrideStart;
+	while(pMem->buf.byteIdx < overrideEnd) {
+		PixtyValidIdx64 *pEntry = pLog->overrideTable.pArr + pLog->overrideTable.count;
+		++pLog->overrideTable.count;
+
+		bool hasOverride = false;
+		pixioByteArrRead(&pMem->buf, &hasOverride, 8);
+		if (!hasOverride) {
+			*pEntry = (PixtyValidIdx64){0};
+			continue;
+		}
+		I64 start = pMem->buf.byteIdx;
+		decodeOverride(&pMem->buf, NULL);
+		decodeOverride(&pMem->buf, NULL);
+		decodeOverride(&pMem->buf, NULL);
+		decodeOverride(&pMem->buf, NULL);
+		pixioByteArrAlign(&pMem->buf);
+		I32 size = pMem->buf.byteIdx - start;
+		memcpy(pLog->dataMem.pArr + offset, pMem->buf.pArr + start, size);
+		*pEntry = (PixtyValidIdx64){.idx = offset, .valid = true};
+		offset += size;
+	};
+}
+
 static
 PixErr decodeLog(
 	CarkInCtx *pCtx,
@@ -1184,9 +1428,13 @@ PixErr decodeLog(
 	I32 structsLogged = 0;
 	I32 rangeTotal = 0;
 	I64 dataTotal = 0;
+	I64 overrideTotal = 0;
+	I32 overrideComp = 0;
 	pixioByteArrRead(&pMem->buf, &structsLogged, BITLEN(LOG_STRUCT_COUNT));
 	pixioByteArrRead(&pMem->buf, &rangeTotal, BITLEN(LOG_RANGE_TOTAL));
 	pixioByteArrRead(&pMem->buf, &dataTotal, BITLEN(LOG_DATA_TOTAL));
+	pixioByteArrRead(&pMem->buf, &overrideTotal, BITLEN(LOG_OVERRIDE_TOTAL));
+	pixioByteArrRead(&pMem->buf, &overrideComp, BITLEN(LOG_OVERRIDE_COMP_TOTAL));
 	PIX_ERR_RETURN_IFNOT_COND(
 		err,
 		structsLogged > 0 && rangeTotal > 0 && dataTotal > 0,
@@ -1194,7 +1442,13 @@ PixErr decodeLog(
 	);
 	PIXALC_DYN_ARR_RESIZE(CarkInStructLog, &pCtx->alloc, &pLog->structs, structsLogged);
 	PIXALC_DYN_ARR_RESIZE(PixtyRange, &pCtx->alloc, &pLog->rangeMem, rangeTotal);
-	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pLog->dataMem, dataTotal);
+	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pLog->dataMem, dataTotal + overrideTotal);
+	PIXALC_DYN_ARR_RESIZE(
+		PixtyValidIdx64,
+		&pCtx->alloc,
+		&pLog->overrideTable,
+		overrideComp
+	);
 	pLog->structs.count = structsLogged;
 	for (I32 i = 0; i < structsLogged; ++i) {
 		CarkInStructLog *pStructLog = pLog->structs.pArr + i;
@@ -1205,23 +1459,29 @@ PixErr decodeLog(
 			pStructLog->idx >= 0 && pStructLog->idx < pStage->structCount,
 			"struct idx is out of bounds"
 		);
-		I32 count = 0;
-		pixioByteArrRead(&pMem->buf, &count, BITLEN(LOG_COUNT));
-		I32 byteSize = structByteSize(pStage->pStructArr + pStructLog->idx, false);
-		pStructLog->data.count = count * byteSize;
-		pStructLog->data.pArr = pLog->dataMem.pArr + pLog->dataMem.count;
-		pLog->dataMem.count += pStructLog->data.count;
-		pixioByteArrRead(&pMem->buf, &pStructLog->rangeArr.size, BITLEN(LOG_RANGE_COUNT));
-		pStructLog->rangeArr.count = pStructLog->rangeArr.size;
-		pStructLog->rangeArr.pArr = pLog->rangeMem.pArr + pLog->rangeMem.count;
-		pLog->rangeMem.count += pStructLog->rangeArr.count;
-		for (I32 j = 0; j < pStructLog->rangeArr.count; ++j) {
-			PixtyRange *pRange = pStructLog->rangeArr.pArr + j;
+		pixioByteArrRead(&pMem->buf, &pStructLog->count, BITLEN(LOG_COUNT));
+		pStructLog->byteSize = structByteSize(pStage->pStructArr + pStructLog->idx, false);
+		pStructLog->dataIdx = pLog->dataMem.count;
+		pixioByteArrRead(&pMem->buf, &pStructLog->rangeCount, BITLEN(LOG_RANGE_COUNT));
+		pStructLog->rangeIdx = pLog->rangeMem.count;
+		pLog->rangeMem.count += pStructLog->rangeCount;
+		for (I32 j = 0; j < pStructLog->rangeCount; ++j) {
+			PixtyRange *pRange = pLog->rangeMem.pArr + pStructLog->rangeIdx + j;
 			pixioByteArrRead(&pMem->buf, &pRange->start, BITLEN(LOG_RANGE_STARTEND));
 			pixioByteArrRead(&pMem->buf, &pRange->end, BITLEN(LOG_RANGE_STARTEND));
 		}
-		pixioByteArrRead(&pMem->buf, pStructLog->data.pArr, pStructLog->data.count * 8);
+		I64 dataSize = pStructLog->count * pStructLog->byteSize;
+		pLog->dataMem.count += dataSize;
+		PIX_ERR_ASSERT("", pLog->dataMem.count <= pLog->dataMem.size);
+		pixioByteArrRead(&pMem->buf, pLog->dataMem.pArr + pStructLog->idx, dataSize * 8);
+		I64 overrideSize = 0;
+		pixioByteArrRead(&pMem->buf, &overrideSize, BITLEN(LOG_OVERRIDE_SIZE));
+		I64 overrideStart = pLog->dataMem.count;
+		pLog->dataMem.count += overrideSize;
+		PIX_ERR_ASSERT("", pLog->dataMem.count <= pLog->dataMem.size);
+		loadRefOverrides(pLog, pMem, overrideStart, overrideSize);
 	}
+	PIX_ERR_RETURN_IFNOT_COND(err, pMem->buf.byteIdx == pStage->bufSize, "");
 	return err;
 }
 
@@ -1257,31 +1517,37 @@ void carkInFileLogClear(CarkInStageLog *pLog) {
 	pLog->dataMem.count = pLog->rangeMem.count = pLog->structs.count = 0;
 }
 
-I32 carkInStructLogCount(const CarkInStructLog *pLog) {
+PixErr carkInRefOverrideGet(const CarkInStageLog *pLog, I32 structIdx) {
+}
+
+I32 carkInStructLogCount(const CarkInStageLog *pLog, I32 structIdx) {
 	I32 count = 0;
-	for (I32 i = 0; i < pLog->rangeArr.count; ++i) {
-		PixtyRange range = pLog->rangeArr.pArr[i];
+	const CarkInStructLog *pStructLog = pLog->structs.pArr + structIdx;
+	for (I32 i = 0; i < pStructLog->rangeCount; ++i) {
+		PixtyRange range = pLog->rangeMem.pArr[pStructLog->rangeIdx + i];
 		count += range.end - range.start;
 	}
 	return count;
 }
 
 PixErr carkInLogIdx(
-	const CarkInStructLog *pLog,
+	const CarkInStageLog *pLog,
 	const CarkStage *pStage,
+	I32 structIdx,
 	I32 itemIdx,
 	CarkInLogItem *pItem
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	I32 offset = 0;
 	//TODO use bst
-	for (I32 i = 0; i < pLog->rangeArr.count; ++i) {
-		PixtyRange range = pLog->rangeArr.pArr[i];
+	const CarkInStructLog *pStructLog = pLog->structs.pArr + structIdx;
+	for (I32 i = 0; i < pStructLog->rangeCount; ++i) {
+		PixtyRange range = pLog->rangeMem.pArr[pStructLog->rangeIdx + i];
 		if (itemIdx >= range.start && itemIdx < range.end) {
 			itemIdx += offset - range.start;
-			PIX_ERR_ASSERT("", itemIdx >= 0 && itemIdx < pLog->data.count);
-			I32 byteSize = pStage->pStructArr[pLog->idx].byteSize;
-			const U8 *pData = pLog->data.pArr + itemIdx * byteSize;
+			PIX_ERR_ASSERT("", itemIdx >= 0 && itemIdx < pStructLog->count);
+			I32 byteSize = pStage->pStructArr[structIdx].byteSize;
+			const U8 *pData = pLog->dataMem.pArr + pStructLog->dataIdx + itemIdx * byteSize;
 			*pItem = (CarkInLogItem){
 				.timestamp = *(F32 *)pData,
 				.pData = pData + sizeof(F32)
@@ -1318,6 +1584,9 @@ void carkInStageLogDestroy(const PixalcFPtrs *pAlloc, CarkInStageLog *pLog) {
 	}
 	if (pLog->rangeMem.pArr) {
 		pAlloc->fpFree(pLog->rangeMem.pArr);
+	}
+	if (pLog->overrideTable.pArr) {
+		pAlloc->fpFree(pLog->overrideTable.pArr);
 	}
 	if (pLog->structs.pArr) {
 		pAlloc->fpFree(pLog->structs.pArr);

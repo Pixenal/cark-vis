@@ -47,12 +47,6 @@ typedef double F64;
 #define GL_ERR_THROW(a, message, handle) \
 	PIX_ERR_THROW_IFNOT_COND(err, !!(a), message, handle);
 
-typedef struct GpuGeo {
-	GLuint vao;
-	GLuint vbo;
-	GLuint ebo;
-} GpuGeo;
-
 typedef struct GpuUbo {
 	GLuint ubo;
 	GLuint uboIdx;
@@ -69,14 +63,14 @@ typedef struct GpuFrame {
 
 typedef struct Viewport {
 	GLuint prog;
-	GpuGeo geo;
+	GpuMesh geo;
 	GpuUbo ubo;
 	GpuFrame frame;
 } Viewport;
 
 typedef struct Timeline {
 	GLuint prog;
-	GpuGeo geo;
+	GpuMesh geo;
 	GpuUbo ubo;
 	GpuFrame frame;
 } Timeline;
@@ -225,28 +219,6 @@ PixErr gpuProgInit(const GLchar *pVertSrc, const GLchar *pFragSrc, GLuint *pProg
 }
 
 static
-void gpuGeoInit(
-	I32 vecSize,
-	I32 posArrSize,
-	GLfloat *pPosArr,
-	I32 cornerArrSize,
-	GLuint *pCornerArr,
-	GpuGeo *pGeo
-) {
-	glGenVertexArrays(1, &pGeo->vao);
-	glBindVertexArray(pGeo->vao);
-	glGenBuffers(1, &pGeo->ebo);
-	glGenBuffers(1, &pGeo->vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, pGeo->vbo);
-	glBufferData(GL_ARRAY_BUFFER, posArrSize, pPosArr, GL_STATIC_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pGeo->ebo);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cornerArrSize, pCornerArr, GL_STATIC_DRAW);
-	I32 vecByteSize = vecSize * sizeof(GL_FLOAT);
-	glVertexAttribPointer(VERT_POS_LOCATION, vecSize, GL_FLOAT, false, vecByteSize, NULL);
-	glEnableVertexAttribArray(VERT_POS_LOCATION);
-}
-
-static
 void gpuUboInit(GLuint prog, const GLchar *pName, I32 size, I32 location, GpuUbo *pUbo) {
 	pUbo->size = size;
 	glGenBuffers(1, &pUbo->ubo);
@@ -297,10 +269,13 @@ PixErr timelineInit(Timeline *pTimeline) {
 		0, 1, 2,
 		2, 3, 0
 	};
-	gpuGeoInit(
+	gpuMeshInit(
 		2,
-		sizeof(posArr), posArr,
-		sizeof(cornerArr), cornerArr,
+		sizeof(posArr),
+		posArr,
+		sizeof(cornerArr),
+		cornerArr,
+		2,
 		&pTimeline->geo
 	);
 	gpuUboInit(pTimeline->prog, "timelineDrawArgs", sizeof(TimelineDrawArgs), 1, &pTimeline->ubo);
@@ -376,10 +351,13 @@ PixErr viewportInit(Viewport *pViewport) {
 		3, 0, 4, 4, 7, 3,
 		4, 5, 6, 6, 7, 2
 	};
-	gpuGeoInit(
+	gpuMeshInit(
 		3,
-		sizeof(posArr), posArr,
-		sizeof(cornerArr), cornerArr,
+		sizeof(posArr),
+		posArr,
+		sizeof(cornerArr),
+		cornerArr,
+		12,
 		&pViewport->geo
 	);
 	gpuUboInit(pViewport->prog, "viewportDrawArgs", sizeof(ViewportDrawArgs), 0, &pViewport->ubo);
@@ -387,17 +365,17 @@ PixErr viewportInit(Viewport *pViewport) {
 }
 
 static
-void gpuGeoDestroy(GpuGeo *pGeo) {
-	if (glIsBuffer(pGeo->vbo)) {
-		glDeleteBuffers(1, &pGeo->vbo);
+void gpuMeshDestroy(GpuMesh *pMesh) {
+	if (glIsBuffer(pMesh->vbo)) {
+		glDeleteBuffers(1, &pMesh->vbo);
 	}
-	if (glIsBuffer(pGeo->ebo)) {
-		glDeleteBuffers(1, &pGeo->ebo);
+	if (glIsBuffer(pMesh->ebo)) {
+		glDeleteBuffers(1, &pMesh->ebo);
 	}
-	if (glIsVertexArray(pGeo->vao)) {
-		glDeleteVertexArrays(1, &pGeo->vao);
+	if (glIsVertexArray(pMesh->vao)) {
+		glDeleteVertexArrays(1, &pMesh->vao);
 	}
-	*pGeo = (GpuGeo){0};
+	*pMesh = (GpuMesh){0};
 }
 
 static
@@ -422,7 +400,7 @@ static
 void timelineDestroy(Timeline *pTimeline) {
 	gpuFrameDestroy(&pTimeline->frame);
 	gpuUboDestroy(&pTimeline->ubo);
-	gpuGeoDestroy(&pTimeline->geo);
+	gpuMeshDestroy(&pTimeline->geo);
 	if (glIsProgram(pTimeline->prog)) {
 		glDeleteProgram(pTimeline->prog);
 	}
@@ -433,7 +411,7 @@ static
 void viewportDestroy(Viewport *pViewport) {
 	gpuFrameDestroy(&pViewport->frame);
 	gpuUboDestroy(&pViewport->ubo);
-	gpuGeoDestroy(&pViewport->geo);
+	gpuMeshDestroy(&pViewport->geo);
 	if (glIsProgram(pViewport->prog)) {
 		glDeleteProgram(pViewport->prog);
 	}
@@ -578,21 +556,24 @@ void drawViewport(const Session *pSession, const View *pView, const Viewport *pV
 		.pitch = pView->pitch,
 		.camDist = pView->camDist
 	};
-	I32 triCount;
-	if (pSession->renderMesh.triCount) {
-		glBindVertexArray(pSession->renderMesh.vao);
-		triCount = pSession->renderMesh.triCount;
+	const GpuMesh *pMesh;
+	if (pSession->activeStage >= 0 &&
+	    pSession->activeStage < pSession->info.pStageArr->count &&
+		pSession->meshArr.pTable[pSession->activeStage].valid
+	) {
+		I32 meshIdx = pSession->meshArr.pTable[pSession->activeStage].idx;
+		const GpuMesh *pMesh = pSession->meshArr.pArr + meshIdx;
+		PIX_ERR_ASSERT("", pMesh->triCount >= 0);
 	}
 	else {
-		glBindVertexArray(pViewport->geo.vao);
-		triCount = 12;
+		pMesh = &pViewport->geo;
 	}
 	gpuFrameClear(&pViewport->frame);
 	glUseProgram(pViewport->prog);
 	gpuUboBind(&pViewport->ubo, &drawArgs);
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glEnable(GL_DEPTH_TEST);
-	glDrawElements(GL_TRIANGLES, triCount * 3, GL_UNSIGNED_INT, NULL);
+	glDrawElements(GL_TRIANGLES, pMesh->triCount * 3, GL_UNSIGNED_INT, NULL);
 }
 
 static
@@ -605,18 +586,21 @@ void drawTimeline(const Session *pSession, const View *pView, const Timeline *pT
 	F32 size = 4.0f;
 	F32 bottom = size;
 	F32 right = size * aspect;
-	TimelineDrawArgs drawArgs = {
-		.ortho = ortho(-right, right, bottom, -bottom, zNear, zFar),
-		.pos = {-2.0f, 1.0f},
-		.size = {4.0f, 1.0f}
-	};
 	glBindVertexArray(pTimeline->geo.vao);
 	gpuFrameClear(&pTimeline->frame);
 	glUseProgram(pTimeline->prog);
-	gpuUboBind(&pTimeline->ubo, &drawArgs);
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	glEnable(GL_DEPTH_TEST);
-	glDrawElements(GL_TRIANGLES, 2 * 3, GL_UNSIGNED_INT, NULL);
+
+	for (I32 i = 0; i < 4; ++i) {
+		TimelineDrawArgs drawArgs = {
+			.ortho = ortho(-right, right, bottom, -bottom, zNear, zFar),
+			.pos = {-2.0f + i, -1.0f + i},
+			.size = {4.0f, 1.0f}
+		};
+		gpuUboBind(&pTimeline->ubo, &drawArgs);
+		glDrawElements(GL_TRIANGLES, 2 * 3, GL_UNSIGNED_INT, NULL);
+	}
 }
 
 static
@@ -760,6 +744,14 @@ PixErr guiEventHandle(SDL_Window *pWindow, CarkGuiState *pGui, CarkGuiEvent even
 
 static
 void sessionClear(Session *pSession) {
+	I32 stageCount = pSession->info.pStageArr->count;
+	if (pSession->meshArr.pTable && stageCount) {
+		memset(pSession->meshArr.pTable, 0, stageCount * sizeof(I32));
+	}
+	for (I32 i = 0; i < stageCount; ++i) {
+		gpuMeshDestroy(pSession->meshArr.pArr + i);
+	}
+	pSession->meshArr.count = 0;
 	for (I32 i = 0; i < pSession->logArr.size; ++i) {
 		carkInStageLogDestroy(&alloc, pSession->logArr.pArr + i);
 	}
@@ -771,6 +763,9 @@ void sessionClear(Session *pSession) {
 static
 void sessionDestroy(Session *pSession) {
 	sessionClear(pSession);
+	if (pSession->meshArr.pTable) {
+		free(pSession->meshArr.pTable);
+	}
 	if (pSession->stageTypeArr.pArr) {
 		free(pSession->stageTypeArr.pArr);
 	}
@@ -1298,6 +1293,14 @@ PixErr meshTriangulate(Mesh *pMesh) {
 }
 
 static
+void meshClear(Mesh *pMesh) {
+	pMesh->faces.count = 0;
+	pMesh->corners.count = 0;
+	pMesh->pos.count = 0;
+	pMesh->tris = false;
+}
+
+static
 void meshDestroy(Mesh *pMesh) {
 	if (pMesh->faces.pArr) {
 		free(pMesh->faces.pArr);
@@ -1312,30 +1315,46 @@ void meshDestroy(Mesh *pMesh) {
 }
 
 static
-PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh) {
+void gpuMeshInit(
+	I32 vecSize,
+	I32 posArrSize,
+	GLfloat *pPosArr,
+	I32 cornerArrSize,
+	GLuint *pCornerArr,
+	I32 triCount,
+	GpuMesh *pMesh
+) {
+	*pMesh = (GpuMesh){.triCount = triCount};
+	glGenVertexArrays(1, &pMesh->vao);
+	glBindVertexArray(pMesh->vao);
+	glGenBuffers(1, &pMesh->ebo);
+	glGenBuffers(1, &pMesh->vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pMesh->vbo);
+	glBufferData(GL_ARRAY_BUFFER, posArrSize, pPosArr, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pMesh->ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cornerArrSize, pCornerArr, GL_STATIC_DRAW);
+	I32 vecByteSize = vecSize * sizeof(GL_FLOAT);
+	glVertexAttribPointer(VERT_POS_LOCATION, vecSize, GL_FLOAT, false, vecByteSize, NULL);
+	glEnableVertexAttribArray(VERT_POS_LOCATION);
+}
+
+static
+PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh, I32 stage) {
 	PixErr err = PIX_ERR_SUCCESS;
-	glGenVertexArrays(1, &pSession->renderMesh.vao);
-	glBindVertexArray(pSession->renderMesh.vao);
-	glGenBuffers(1, &pSession->renderMesh.ebo);
-	glGenBuffers(1, &pSession->renderMesh.vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, pSession->renderMesh.vbo);
-	glBufferData(
-		GL_ARRAY_BUFFER,
+	I32 newIdx = 0;
+	PIXALC_DYN_ARR_ADD(GpuMesh, &alloc, &pSession->meshArr, newIdx);
+	GpuMesh *pGpuMesh = pSession->meshArr.pArr + newIdx;
+	PIX_ERR_ASSERT("", pSession->meshArr.pTable);
+	pSession->meshArr.pTable[stage] = (PixtyValidIdx){.idx = newIdx, .valid = true};
+	gpuMeshInit(
+		3,
 		pMesh->pos.count * sizeof(PixtyV3_F32),
 		pMesh->pos.pArr,
-		GL_STATIC_DRAW
-	);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pSession->renderMesh.ebo);
-	glBufferData(
-		GL_ELEMENT_ARRAY_BUFFER,
 		pMesh->corners.count * sizeof(I32),
 		pMesh->corners.pArr,
-		GL_STATIC_DRAW
+		pMesh->corners.count / 3,
+		pGpuMesh
 	);
-	I32 vecSize = sizeof(PixtyV3_F32);
-	glVertexAttribPointer(VERT_POS_LOCATION, 3, GL_FLOAT, false, vecSize, NULL);
-	glEnableVertexAttribArray(VERT_POS_LOCATION);
-	pSession->renderMesh.triCount = pMesh->corners.count / 3;
 	return err;
 }
 
@@ -1362,9 +1381,13 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		&pSession->logArr,
 		pSession->info.pStageArr->count
 	);
+	I32 stageCount = pSession->info.pStageArr->count;
+	if (!pSession->meshArr.pTable && stageCount) {
+		pSession->meshArr.pTable = calloc(stageCount, sizeof(PixtyValidIdx));
+	}
 	pSession->logArr.size = pSession->info.pStageArr->count;
 	pSession->logArr.pArr = calloc(pSession->logArr.size, sizeof(CarkInStageLog));
-	for (I32 i = 0; i < pSession->info.pStageArr->count; ++i) {
+	for (I32 i = 0; i < stageCount; ++i) {
 		err = carkInFileLoadLog(&carkCtx, &pSession->file, i, pSession->logArr.pArr + i);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
 	}
@@ -1378,8 +1401,8 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 	pGui->pFileDialogPath = NULL;
 	PIX_ERR_THROW_IFNOT(err, "", 0);
 
-	I32 stageCount = pSession->info.pStageArr->count;
 	PIXALC_DYN_ARR_RESIZE(StageDataType, &alloc, &pSession->stageTypeArr, stageCount);
+	Mesh mesh = {0};
 	for (I32 i = 0; i < stageCount; ++i) {
 		const CarkStage *pStage = pSession->info.pStageArr->pArr + i;
 		if (!pStage->structCount) {
@@ -1394,15 +1417,15 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		if (pSession->stageTypeArr.pArr[i] != STAGE_DATA_MESH) {
 			continue;//TODO handle other types like ARRAY
 		}
-		Mesh mesh = {0};
 		err = meshFromLog(pSession, contains, &cornerBuf, &posBuf, &mesh);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		err = meshTriangulate(&mesh);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
-		err = meshLoadOnGpu(pSession, &mesh);
+		err = meshLoadOnGpu(pSession, &mesh, i);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
-		meshDestroy(&mesh);
+		meshClear(&mesh);
 	}
+	meshDestroy(&mesh);
 
 	PIX_ERR_CATCH(0, err,
 		sessionClear(pSession);
