@@ -18,6 +18,11 @@ if (NOT IS_MULTI_CONFIG)
 	endif()
 endif ()
 if (UNIX)
+	if (APPLE)
+		set(PLATFORM_DIR "macos")
+	else()
+		set(PLATFORM_DIR "linux")
+	endif()
 	message("Building for Unix")
 	set(CMAKE_C_FLAGS "")
 	if (CMAKE_BUILD_TYPE MATCHES DEBUG)
@@ -34,6 +39,7 @@ if (UNIX)
 	set(CMAKE_CXX_STANDARD 11)
 endif()
 if (WIN32)
+	SET(PLATFORM_DIR "win")
 	message("Building for Windows")
 	message("CMAKE_MSVC_RUNTIME_LIB is " ${CMAKE_MSVC_RUNTIME_LIBRARY})
 	set(CMAKE_C_FLAGS "/D WIN32 /TC")
@@ -83,6 +89,8 @@ set(CARK_PIX_ALLOC "" ${CARK_PIX_PATH}/pixenals-alloc-utils)
 set(CARK_PIX_IO "" ${CARK_PIX_PATH}/pixenals-io-utils)
 set(CARK_PIX_MATH "" ${CARK_PIX_PATH}/pixenals-math-utils)
 set(CARK_PIX_MESH "" ${CARK_PIX_PATH}/pixenals-mesh-utils)
+set(CARK_PIX_STRUCT "" ${CARK_PIX_PATH}/pixenals-structs)
+
 if (NOT TARGET PixenalsThreadUtils)
 	add_subdirectory(${CARK_PIX_THREAD} ${CARK_PIX_THREAD})
 endif()
@@ -98,14 +106,42 @@ endif()
 if (NOT TARGET PixenalsMeshUtils)
 	add_subdirectory(${CARK_PIX_MESH} ${CARK_PIX_MESH})
 endif()
+if (NOT TARGET PixenalsStructs)
+	add_subdirectory(${CARK_PIX_STRUCT} ${CARK_PIX_STRUCT})
+endif()
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory(extern/SDL EXCLUDE_FROM_ALL)
 add_subdirectory(extern/glew-cmake)
 add_subdirectory(extern/plutosvg)
 find_package(OpenGL REQUIRED)
+
+#TODO put binaries in build tree, and copy over assets from source on build
+message("output dir is" ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR})
+set_target_properties(${PROJECT} PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin/${PLATFORM_DIR}
+)
+set_target_properties(${PROJECT_IO} PROPERTIES
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+)
+set_target_properties(${PROJECT_GUI} PROPERTIES
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+)
+#note executable & dll are treated as runtime, .so as library, & others as archive (eg static lib),
+#pluto use dll, so all must be set here in order to work on all platforms.
+set_target_properties(plutosvg PROPERTIES
+	LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+)
+set_target_properties(plutovg PROPERTIES
+	LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+	ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+	RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/lib/${PLATFORM_DIR}
+)
+
 target_link_libraries(${PROJECT_IO} PRIVATE
-	PixenalsThreadUtils PixenalsAllocUtils PixenalsIoUtils
+	PixenalsThreadUtils PixenalsAllocUtils PixenalsIoUtils PixenalsStructs
 )
 target_link_libraries(${PROJECT} PRIVATE
 	PixenalsAllocUtils PixenalsIoUtils PixenalsMathUtils PixenalsMeshUtils
@@ -119,15 +155,16 @@ target_include_directories(${PROJECT} PRIVATE include src)
 target_include_directories(${PROJECT_GUI} PRIVATE include src ${IMGUI})
 target_include_directories(${PROJECT_IO} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
-	${CARK_PIX_THREAD}/include ${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include
+	${CARK_PIX_STRUCT}/include ${CARK_PIX_THREAD}/include
+	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include
 )
 target_include_directories(${PROJECT} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
-	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
+	${CARK_PIX_STRUCT}/include ${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
 	${CARK_PIX_MESH}/include extern/glew-cmake/include extern/plutosvg/source
 	${OPENGL_INCLUDE_DIR}
 )
 target_include_directories(${PROJECT_GUI} PUBLIC
 	${CARK_PIX_PATH}/pixenals-types/include ${CARK_PIX_PATH}/pixenals-error-utils/include
-	${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
+	${CARK_PIX_STRUCT}/include ${CARK_PIX_ALLOC}/include ${CARK_PIX_IO}/include ${CARK_PIX_MATH}/include
 )

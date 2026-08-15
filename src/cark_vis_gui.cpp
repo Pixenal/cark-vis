@@ -91,7 +91,7 @@ void logRow(
 	ImGui::TableNextRow();
 	I32 byteIdx = (offset + idxInRange) * (CARK_TIMESTAMP_SIZE + pStructInfo->byteSize);
 	const U8 *pData = pStructLog->data.pArr + byteIdx;
-	I64 timestamp = 0;
+	CARK_TIMESTAMP_TYPE timestamp = 0;
 	memcpy(&timestamp, pData, CARK_TIMESTAMP_SIZE);
 	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {

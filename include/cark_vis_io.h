@@ -8,6 +8,7 @@
 
 #include <pixenals_alloc_utils.h>
 #include <pixenals_io_utils.h>
+#include <pixenals_structs.h>
 
 #ifndef CARK_PRECURSOR_COUNT_MAX
 #define CARK_PRECURSOR_COUNT_MAX 4
@@ -21,7 +22,9 @@
 #ifndef CARK_NAME_LEN_MAX
 #define CARK_NAME_LEN_MAX 64
 #endif
-#define CARK_TIMESTAMP_SIZE 8
+//TODO these timestamp macros probably arn't needed anymore
+#define CARK_TIMESTAMP_TYPE I64
+#define CARK_TIMESTAMP_SIZE sizeof(CARK_TIMESTAMP_TYPE)
 
 typedef struct CarkU8Arr {
 	uint8_t *pArr;
@@ -275,12 +278,22 @@ typedef struct CarkCompInfoArr {
 	int32_t size;
 } CarkCompInfoArr;
 
-typedef struct CarkInStructLog {
+typedef struct CarkInInstLog {
 	int64_t dataIdx;
-	int32_t rangeIdx;
-	int32_t rangeCount;
+	PixuctAvl rangeTree;
 	int32_t count;
+	int32_t overrideIdx;
 	int32_t byteSize;
+} CarkInInstLog;
+
+typedef struct CarkInInstLogArr {
+	CarkInInstLog *pArr;
+	int32_t size;
+	int32_t count;
+} CarkInInstLogArr;
+
+typedef struct CarkInStructLog {
+	CarkInInstLogArr instArr;
 	int32_t idx;
 } CarkInStructLog;
 
@@ -290,10 +303,16 @@ typedef struct CarkInStructLogArr {
 	int32_t count;
 } CarkInStructLogArr;
 
+typedef struct CarkItemRange {
+	PixuctAvlNodeCore core;
+	PixtyRange idxRange;
+	int32_t startItem;
+} CarkItemRange;
+
 typedef struct CarkInStageLog {
 	//struct-arr is sparse, containing only structs that were logged.
 	CarkInStructLogArr structs;
-	PixtyRangeArr rangeMem;
+	PixalcLinAlloc rangeMem;
 	PixtyU8Arr dataMem;//using single arr to make potential future compression easier
 	PixtyValidIdx64Arr overrideTable; 
 } CarkInStageLog;
@@ -315,7 +334,7 @@ typedef struct CarkInFileInfo {
 
 typedef struct CarkInLogItem {
 	const U8 *pData;
-	float timestamp;
+	CARK_TIMESTAMP_TYPE timestamp;
 } CarkInLogItem;
 
 PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx);
@@ -330,10 +349,20 @@ PixErr carkInFileInfoGet(
 	CarkInFileInfo *pInfo
 );
 void carkInFileLogClear(CarkInStageLog *pLog);
-int32_t carkInStructLogCount(const CarkInStageLog *pLog, I32 structIdx);
-PixErr carkInLogIdx(
-	const CarkInStructLog *pLog,
+PixErr carkInRefOverrideGet(
+	const CarkInStageLog *pLog,
 	const CarkStage *pStage,
+	int32_t structIdx,
+	int32_t inst,
+	int32_t itemIdx,
+	CarkRefOverrideArr *pRefArr
+);
+int32_t carkInStructLogCount(const CarkInStageLog *pLog, int32_t structIdx, int32_t inst);
+PixErr carkInLogIdx(
+	const CarkInStageLog *pLog,
+	const CarkStage *pStage,
+	int32_t structIdx,
+	int32_t inst,
 	int32_t itemIdx,
 	CarkInLogItem *pItem
 );
