@@ -170,6 +170,7 @@ typedef struct CarkStageArr {
 } CarkStageArr;
 
 typedef struct CarkInstLog {
+	PixtyI32Arr idxArr;
 	PixioByteArr data;
 	PixioByteArr overrides;
 	int32_t count;
@@ -231,6 +232,7 @@ typedef struct CarkLog {
 	int32_t compCount;
 	int64_t overrideStart;
 	bool enabled;
+	bool hasOverrides;
 } CarkLog;
 
 #ifdef __cplusplus
