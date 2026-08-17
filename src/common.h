@@ -47,19 +47,41 @@ typedef struct GpuMesh {
 
 typedef struct GpuMeshArr {
 	GpuMesh *pArr;
-	PixtyValidIdx *pTable;
 	int32_t size;
 	int32_t count;
 } GpuMeshArr;
+
+typedef struct StageMesh {
+	GpuMeshArr instMeshArr;
+} StageMesh;
+
+typedef struct StageMeshArr {
+	StageMesh *pArr;
+	PixtyValidIdx *pTable;
+	int32_t size;
+	int32_t count;
+} StageMeshArr;
 
 typedef struct Session {
 	StageDataTypeArr stageTypeArr;
 	LogArr logArr;
 	CarkInFile file;
 	CarkInFileInfo info;
-	GpuMeshArr meshArr;
+	StageMeshArr stageMeshArr;
 	PixtyV2_I32 viewportSize;//TODO should this be in session?
 	PixtyV2_I32 timelineSize;//TODO ^
 	I32 activeStage;
 	I32 activeStruct;
+	I32 activeInst;
 } Session;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+PixErr avlIterInitConst(const PixuctAvl *pHandle, PixuctAvlIter *pIter);
+bool avlIterAtEnd(const PixuctAvlIter *pIter);
+void avlIterInc(PixuctAvlIter *pIter);
+const PixuctAvlNodeCore *avlIterGetItemConst(PixuctAvlIter *pIter);
+#ifdef __cplusplus
+}
+#endif

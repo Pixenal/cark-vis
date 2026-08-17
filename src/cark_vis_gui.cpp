@@ -81,24 +81,25 @@ void drawIcon(const CarkGuiState *pGui, Icon icon) {
 }
 
 static
-void logRow(
-	I32 offset,
-	I32 idxInRange,
-	PixtyRange range,
-	const CarkInStructLog *pStructLog,
-	const CarkStruct *pStructInfo
+PixErr logRow(
+	const CarkInStageLog *pStageLog,
+	const CarkStruct *pStructInfo,
+	const CarkItemRange  *pRange,
+	I32 idxInRange
 ) {
+	PixErr err = PIX_ERR_SUCCESS;
 	ImGui::TableNextRow();
-	I32 byteIdx = (offset + idxInRange) * (CARK_TIMESTAMP_SIZE + pStructInfo->byteSize);
-	const U8 *pData = pStructLog->data.pArr + byteIdx;
+	I32 idx = pRange->startItem + idxInRange;
+	I64 byteIdx = idx * (CARK_TIMESTAMP_SIZE + pStructInfo->byteSize);
+	const U8 *pData = pStageLog->dataMem.pArr + byteIdx;
 	CARK_TIMESTAMP_TYPE timestamp = 0;
-	memcpy(&timestamp, pData, CARK_TIMESTAMP_SIZE);
+	timestamp = *(CARK_TIMESTAMP_TYPE *)pData;
 	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {
 		ImGui::Text("%p", timestamp);
 	}
 	if (ImGui::TableSetColumnIndex(1)) {
-		ImGui::Text("%d", range.start + idxInRange);
+		ImGui::Text("%d", pRange->idxRange.start + idxInRange);
 	}
 	for (I32 k = 0; k < pStructInfo->info.compCount; ++k) {
 		const CarkCompInfo *pCompInfo = pStructInfo->info.pCompArr + k;
@@ -150,10 +151,16 @@ void logRow(
 				PIX_ERR_ASSERT("invalid component type", false);
 		}
 	}
+	return err;
 }
 
 static
-void logTable(const CarkInStructLog *pStructLog, const CarkStruct *pStructInfo) {
+PixErr logTable(
+	const CarkInStageLog *pStageLog,
+	const CarkInInstLog *pInstLog,
+	const CarkStruct *pStructInfo
+) {
+	PixErr err = PIX_ERR_SUCCESS;
 	ImGuiTableColumnFlags columnFlags = ImGuiTableColumnFlags_None;
 	ImGui::TableSetupColumn("Timestamp", columnFlags);
 	ImGui::TableSetupColumn("Index", columnFlags);
@@ -162,15 +169,19 @@ void logTable(const CarkInStructLog *pStructLog, const CarkStruct *pStructInfo) 
 	}
 	ImGui::TableHeadersRow();
 	I32 offset = 0;
-	for (I32 i = 0; i < pStructLog->rangeArr.count; ++i) {
-		PixtyRange range = pStructLog->rangeArr.pArr[i];
-		I32 rangeSize = range.end - range.start;
+	PixuctAvlIter iter = {0};
+	err = avlIterInitConst(&pInstLog->rangeTree, &iter);
+	PIX_ERR_RETURN_IFNOT(err, "");
+	for (; !avlIterAtEnd(&iter); avlIterInc(&iter)) {
+		const CarkItemRange *pRange = (CarkItemRange *)avlIterGetItemConst(&iter);
+		I32 rangeSize = pRange->idxRange.end - pRange->idxRange.start;
 		for (I32 j = 0; j < rangeSize; ++j) {
-			logRow(offset, j, range, pStructLog, pStructInfo);
+			err = logRow(pStageLog, pStructInfo, pRange, j);
+			PIX_ERR_RETURN_IFNOT(err, "");
 		}
-		offset += rangeSize;
 	}
 	ImGui::EndTable();
+	return err;
 }
 
 static
@@ -302,7 +313,13 @@ PixErr carkGuiLayout(
 			const CarkStage *pStageInfo = pSession->info.pStageArr->pArr + stageIdx;
 			PIX_ERR_ASSERT("", pSession->activeStruct < pStageInfo->structCount);
 			I32 structIdx = pSession->activeStruct;
-			const CarkInStructLog *pStructLog = pStageLog->structs.pArr + structIdx;
+			CarkInRef ref = {
+				{pSession->activeStage, pSession->activeStruct},
+				pSession->activeInst
+			};
+			const CarkInInstLog *pInstLog = NULL;
+			err = carkInInstLogFromRef(pStageLog, ref, &pInstLog);
+			PIX_ERR_RETURN_IFNOT(err, "");
 			const CarkStruct *pStructInfo = pStageInfo->pStructArr + structIdx;
 			ImGuiTableFlags tableFlags =
 				ImGuiTableFlags_ScrollX |
@@ -314,7 +331,8 @@ PixErr carkGuiLayout(
 				ImGuiTableFlags_NoHostExtendX;
 			I32 columnCount = 2 + pStructInfo->info.compCount;
 			if (ImGui::BeginTable("Comp Log", columnCount, tableFlags, ImVec2{.0f, .0f})) {
-				logTable(pStructLog, pStructInfo);
+				err = logTable(pStageLog, pInstLog, pStructInfo);
+				PIX_ERR_RETURN_IFNOT(err, "");
 			}
 		}
 		ImGui::End();
