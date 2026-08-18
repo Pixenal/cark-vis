@@ -152,15 +152,21 @@ typedef struct CarkStructArr {
 	int32_t size;
 } CarkStructArr;
 
+typedef struct CarkLogInfo {
+	int64_t bufStart;
+	int64_t bufSize;
+	int64_t bufCompressSize;
+	bool done;
+} CarkLogInfo;
+
 typedef struct CarkStage {
 	CarkStruct *pStructArr;
 	U8 *pStructMem;
 	int32_t structCount;
 	int32_t idx;
-	int64_t bufStart;
-	int64_t bufSize;
-	int64_t bufCompressSize;
+	CarkLogInfo logInfo;
 	char name[CARK_NAME_LEN_MAX + 1];
+	bool threadLocal;
 } CarkStage;
 
 typedef struct CarkStageArr {
@@ -248,7 +254,20 @@ PixErr carkOutStageInit(
 	CarkOutCtx *pCtx,
 	const char *pName,
 	const CarkStructInfoArr *pStructArr,
+	bool threadLocal,
 	int32_t *pHandle
+);
+int32_t carkOutInstAdd(
+	CarkOutCtx *pCtx,
+	int32_t thread,
+	int32_t stageIdx,
+	int32_t structIdx
+);
+int32_t carkOutInstGetLastAdded(
+	const CarkOutCtx *pCtx,
+	int32_t thread,
+	int32_t stageIdx,
+	int32_t structIdx
 );
 //TODO add single function wrapper of start-comp-end for single-comp structs
 PixErr carkOutLogStart(
