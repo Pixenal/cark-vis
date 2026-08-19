@@ -14,6 +14,7 @@
 #define PI 3.1415926536f
 #define VERT_POS_LOCATION 0
 #define BIN_PATH_LEN_MAX 16384
+#define SENSITIVITY .5f
 
 typedef int16_t I16;
 typedef int32_t I32;
@@ -89,6 +90,7 @@ typedef struct View {
 typedef struct Keys {
 	bool pan;
 	bool orbit;
+	bool scroll;
 } Keys;
 
 static PixalcFPtrs alloc = {
@@ -679,10 +681,15 @@ PixErr eventHandle(
 		case SDL_EVENT_MOUSE_MOTION:
 			if (pKeys->orbit) {
 				PixtyV2_F32 motion = {pEvent->motion.xrel, pEvent->motion.yrel};
+				_(&motion V2MULSEQL SENSITIVITY);
 				if (pKeys->pan) {
-					motion = _(motion V2MULS .05f);
+					motion = _(motion V2MULS .01f);
 					motion.d[1] *= -1.0f;
 					_(&pView->pan V2ADDEQL motion);
+				}
+				else if (pKeys->scroll) {
+					pView->camDist += motion.d[1] * .05f;
+					pView->camDist = pView->camDist >= .0f ? pView->camDist : .0f;
 				}
 				else {
 					motion = _(_(motion V2DIV fWindowSize) V2MULS 2.0f * PI);
@@ -698,14 +705,21 @@ PixErr eventHandle(
 		case SDL_EVENT_MOUSE_BUTTON_UP:
 			if (pEvent->button.button == SDL_BUTTON_MIDDLE) {
 				pKeys->orbit = false;
+				pKeys->scroll = false;
+				pKeys->pan = false;
 			}
 			break;
 		case SDL_EVENT_KEY_DOWN:
 			switch (pEvent->key.key) {
+				case SDLK_LCTRL:
+				//v fallthrough v
+				case SDLK_RCTRL:
+					pKeys->scroll = pKeys->scroll || !pKeys->orbit;
+					break;
 				case SDLK_LSHIFT:
 				//v fallthrough v
 				case SDLK_RSHIFT:
-					pKeys->pan = true;
+					pKeys->pan = pKeys->pan || !pKeys->orbit;
 					break;
 				default:
 					;
@@ -713,17 +727,22 @@ PixErr eventHandle(
 			break;
 		case SDL_EVENT_KEY_UP:
 			switch (pEvent->key.key) {
+				case SDLK_LCTRL:
+				//v fallthrough v
+				case SDLK_RCTRL:
+					pKeys->scroll = pKeys->scroll && pKeys->orbit;
+					break;
 				case SDLK_LSHIFT:
 				//v fallthrough v
 				case SDLK_RSHIFT:
-					pKeys->pan = false;
+					pKeys->pan = pKeys->pan && pKeys->orbit;
 					break;
 				default:
 					;
 			}
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
-			pView->camDist -= pEvent->wheel.y;
+			pView->camDist -= pEvent->wheel.y * SENSITIVITY;
 			pView->camDist = pView->camDist >= .0f ? pView->camDist : .0f;
 			break;
 		default:
@@ -1096,26 +1115,76 @@ PixErr instLogFromRef(
 	return err;
 }
 
+typedef struct VertKey {
+	I32 logIdx;
+	CarkInRef ref;
+} VertKey;
+
+typedef struct VertRedir {
+	PixuctHTableEntryCore core;
+	I32 entryIdx;
+	U32 idx : 31;
+	U32 added : 1; 
+	VertKey key;
+} VertRedir;
+
+static
+PixuctKey vertKeyMake(const void *pKey) {
+	return (PixuctKey){.pKey = pKey, .size = sizeof(VertKey)};
+}
+
+static
+bool vertKeyCmp(
+	const PixuctHTableEntryCore *pEntryRaw,
+	const void *pKeyRaw,
+	const void *pInitInfo
+) {
+	const VertRedir *pEntry = (void *)pEntryRaw;
+	const VertKey *pKey = pKeyRaw;
+	return !memcmp(&pEntry->key, pKey, sizeof(VertKey));
+}
+
 static
 PixErr facePosGet(
 	const Session *pSession,
 	const CarkStage *pStage,
 	const CarkInStageLog *pStageLog,
+	PixtyI32Arr *pCornerBuf,
+	V3_F32Arr *pPosBuf,
+	I32 corner,
 	CarkInRef posRef,
 	I32 vertIdx,
-	V3_F32Arr *pPosBuf,
-	PixtyValidIdx *pVertRedir,
+	PixuctHTable *pVertTable,
 	bool *pNoLog
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
-	pPosBuf->count = 0;
 	const CarkStruct *pPosInfo = NULL;
 	err = carkStructInfoFromRef(&pSession->info, posRef.ref, &pPosInfo);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	const CarkInInstLog *pPosLog = NULL;
 	err = instLogFromRef(pSession, posRef, &pPosLog);
 
-	if (pVertRedir[vertIdx].valid) {
+	VertRedir *pEntry = NULL;
+	VertKey key = {.logIdx = vertIdx, .ref = posRef};
+	I32 entryIdx = 0;
+	SearchResult result = pixuctHTableBasicGet(
+		pVertTable,
+		0,
+		&key,
+		&pEntry,
+		true,
+		&entryIdx,
+		vertKeyMake, vertKeyCmp
+	);
+	PIX_ERR_ASSERT("", pEntry);
+
+
+	I32 newCorner = 0;
+	PIXALC_DYN_ARR_ADD(I32, &alloc, pCornerBuf, newCorner);
+	pCornerBuf->pArr[newCorner] = pEntry->added ? pEntry->entryIdx : entryIdx;
+
+	if (pEntry->added) {
+		PIX_ERR_ASSERT("", result == PIX_SEARCH_FOUND);
 		return err;
 	}
 	CarkInLogItem item = {0};
@@ -1128,13 +1197,15 @@ PixErr facePosGet(
 		&item
 	);
 	PIX_ERR_RETURN_IFNOT(err, "");
+	*pEntry = (VertRedir){.core = pEntry->core, .key = key, .entryIdx = entryIdx};
 	if (!item.pData) {
-		*pNoLog = true;
-		return err;//pos wasn't logged
+		*pNoLog = true;//pos wasn't logged
+		return err;
 	}
-	I32 newIdx = 0;
-	PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, pPosBuf, newIdx);
-	pPosBuf->pArr[newIdx] = *(PixtyV3_F32 *)item.pData;
+	I32 newVert = 0;
+	PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, pPosBuf, newVert);
+	pPosBuf->pArr[newVert] = *(PixtyV3_F32 *)item.pData;
+	pEntry->idx = newVert;
 	return err;
 }
 
@@ -1147,11 +1218,12 @@ PixErr faceCornersGet(
 	FaceRange faceRange,
 	PixtyI32Arr *pCornerBuf,
 	V3_F32Arr *pPosBuf,
-	PixtyValidIdx *pVertRedir,
+	PixuctHTable *pVertTable,
 	bool *pNoLog
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	pCornerBuf->count = 0;
+	pPosBuf->count = 0;
 	const CarkStruct *pCornerInfo = NULL;
 	err = carkStructInfoFromRef(&pSession->info, cornerRef.ref, &pCornerInfo);
 	PIX_ERR_RETURN_IFNOT(err, "");
@@ -1172,10 +1244,6 @@ PixErr faceCornersGet(
 	for (I32 i = 0; i < faceRange.size; ++i) {
 		I32 offset = i * (pCornerInfo->byteSize + CARK_TIMESTAMP_SIZE);
 		I32 vertIdx = *(I32 *)(item.pData + offset);
-		I32 newIdx = 0;
-		PIXALC_DYN_ARR_ADD(I32, &alloc, pCornerBuf, newIdx);
-		pCornerBuf->pArr[newIdx] = vertIdx;
-
 		I32 corner =  faceRange.start + i;
 		CarkInRefArr posRefArr = {0};
 		err = carkInCompRefsGet(pStageLog, pStage, cornerRef, corner, &posRefArr);
@@ -1183,13 +1251,18 @@ PixErr faceCornersGet(
 			pSession,
 			pStage,
 			pStageLog,
+			pCornerBuf,
+			pPosBuf,
+			corner,
 			posRefArr.arr[0],
 			vertIdx,
-			pPosBuf,
-			pVertRedir,
+			pVertTable,
 			pNoLog
 		);
 		PIX_ERR_RETURN_IFNOT(err, "");
+		if (*pNoLog) {
+			return err;
+		}
 	}
 	PIX_ERR_ASSERT("", faceRange.size == pCornerBuf->count);
 	return err;
@@ -1201,23 +1274,25 @@ void meshAddFace(
 	FaceRange faceRange,
 	const PixtyI32Arr *pCornerBuf,
 	const V3_F32Arr *pPosBuf,
-	PixtyValidIdx *pVertRedir
+	PixuctHTable *pVertTable
 ) {
 	I32 newIdx = 0;
 	PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->faces, newIdx);
 	pMesh->faces.pArr[newIdx] = pMesh->corners.count;
 	I32 posBufIdx = 0;
+	PixalcLinAlloc *pVertTableMem = pixuctHTableAllocGet(pVertTable, 0);
 	for (I32 i = 0; i < faceRange.size; ++i) {
-		PixtyValidIdx *pRedirEntry = pVertRedir + pCornerBuf->pArr[i];
+		VertRedir *pVertEntry = pixalcLinAllocIdx(pVertTableMem, pCornerBuf->pArr[i]);
 		I32 vertIdx = 0;
-		if (pRedirEntry->valid) {
-			vertIdx = (I32)pRedirEntry->idx;
+		if (pVertEntry->added) {
+			vertIdx = (I32)pVertEntry->idx;
 		}
 		else {
 			PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, &pMesh->pos, vertIdx);
 			pMesh->pos.pArr[vertIdx] = pPosBuf->pArr[posBufIdx];
 			++posBufIdx;
-			*pRedirEntry = (PixtyValidIdx){.valid = true, .idx = vertIdx};
+			pVertEntry->idx = (U32)vertIdx;
+			pVertEntry->added = true;
 		}
 		newIdx = 0;
 		PIXALC_DYN_ARR_ADD(I32, &alloc, &pMesh->corners, newIdx);
@@ -1247,18 +1322,19 @@ PixErr meshFromLog(
 	const CarkInInstLog *pFaceLog = NULL;
 	err = instLogFromRef(pSession, faceRef, &pFaceLog);
 	PIX_ERR_RETURN_IFNOT(err, "");
-	
-	I32 vertCount;
-	{
-		CarkInRef posRef = {.ref = pContains[CARK_DESC_POS].ref, .inst = inst};
-		const CarkInStageLog *pPosLog = NULL;
-		err = stageLogFromRef(pSession, posRef.ref.stageIdx, &pPosLog);
-		PIX_ERR_RETURN_IFNOT(err, "");
-		vertCount = carkInLogItemCount(pPosLog, posRef);
-	}
-	PixtyValidIdx *pVertRedir = calloc(vertCount, sizeof(PixtyValidIdx));
-	I32 faceOffset = 0;
 
+	PixuctHTable vertTable = {0};
+	pixuctHTableInit(
+		&alloc,
+		&vertTable,
+		pFaceLog->count,
+		(PixtyI32Arr){.pArr = (I32[]){sizeof(VertRedir)}, .count = 1},
+		NULL,
+		NULL,
+		false
+	);
+
+	I32 faceOffset = 0;
 	I32 sizeCompIdx = -1;
 	for (I32 i = 0; i < pFaceInfo->info.compCount; ++i) {
 		if (pFaceInfo->info.pCompArr[i].desc == CARK_COMP_DESC_SIZE) {
@@ -1297,23 +1373,21 @@ PixErr meshFromLog(
 				faceRange,
 				pCornerBuf,
 				pPosBuf,
-				pVertRedir,
+				&vertTable,
 				&noLog
 			);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			if (noLog) {
-				break;//one or all positions weren't logged
+				continue;//one or all positions weren't logged
 			}
-			meshAddFace(pMesh, faceRange, pCornerBuf, pPosBuf, pVertRedir);
+			meshAddFace(pMesh, faceRange, pCornerBuf, pPosBuf, &vertTable);
 		}
 		faceOffset += rangeSize;
 	}
 	PIXALC_DYN_ARR_RESIZE(I32, &alloc, &pMesh->faces, pMesh->faces.count + 1);
 	pMesh->faces.pArr[pMesh->faces.count] = pMesh->corners.count;
 	PIX_ERR_CATCH(0, err, ;);
-	if (pVertRedir) {
-		free(pVertRedir);
-	}
+	pixuctHTableDestroy(&vertTable);
 	return err;
 }
 
@@ -1358,7 +1432,7 @@ PixErr meshTriangulate(Mesh *pMesh) {
 			continue;//idx-buf uses U8, so skip this face
 		}
 		PIX_ERR_ASSERT("", face.size >= 2);
-		PIXALC_DYN_ARR_RESIZE(U8, &alloc, &idxBuf, face.size - 2);
+		PIXALC_DYN_ARR_RESIZE(U8, &alloc, &idxBuf, (face.size - 2) * 3);
 		I32 triCount = pixmshTriangulateFace(
 			&alloc,
 			(PixmshFaceRange){.start = face.start, .size = face.size},
@@ -1419,11 +1493,12 @@ PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh, I32 stage, I32 inst) 
 	PixtyValidIdx *pIdx = pSession->stageMeshArr.pTable + stage;
 	if (!pIdx->valid) {
 		I32 newIdx = 0;
-		PIXALC_DYN_ARR_ADD(GpuMesh, &alloc, &pSession->stageMeshArr, pIdx->idx);
+		PIXALC_DYN_ARR_ADD_ZERO(StageMesh, &alloc, &pSession->stageMeshArr, pIdx->idx);
 		pIdx->valid = true;
 	}
 	StageMesh *pStageMesh = pSession->stageMeshArr.pArr + pIdx->idx;
-	PIXALC_DYN_ARR_RESIZE(GpuMesh, &alloc, &pStageMesh->instMeshArr, inst);
+	PIXALC_DYN_ARR_RESIZE(GpuMesh, &alloc, &pStageMesh->instMeshArr, inst + 1);
+	pStageMesh->instMeshArr.count = inst + 1;
 	gpuMeshInit(
 		3,
 		pMesh->pos.count * sizeof(PixtyV3_F32),
@@ -1500,8 +1575,8 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		err = stageLogFromRef(pSession, faceRef.stageIdx, &pStageLog);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		const CarkInStructLog *pFaceLog = pStageLog->structs.pArr + faceRef.structIdx;
-		for (I32 j = 0; j < pFaceLog->instArr.count; ++j) {
-			err = meshFromLog(pSession, pStage, i, contains, &cornerBuf, &posBuf, &mesh);
+		for (I32 j = 0; j < 1/*pFaceLog->instArr.count*/; ++j) {
+			err = meshFromLog(pSession, pStage, j, contains, &cornerBuf, &posBuf, &mesh);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			err = meshTriangulate(&mesh);
 			PIX_ERR_THROW_IFNOT(err, "", 0);

@@ -375,7 +375,7 @@ void overrideWrite(
 	pixioByteArrWrite(pAlloc, pByteArr, &(bool){override.override}, 1);
 	if (override.override) {
 		I16 val = (I16)override.val;//TODO use a macro for val bitlen, don't hardcode this
-		pixioByteArrWrite(pAlloc, pByteArr, &val, sizeof(val) - 1);
+		pixioByteArrWrite(pAlloc, pByteArr, &val, sizeof(val) * 8 - 1);
 	}
 }
 
@@ -769,7 +769,7 @@ PixErr compileInstLogs(
 		const U8 *pOverrideStart = pInstLog->overrides.pArr + pOverrideTable[pIdxArr[i]];
 		if (pOverrideStart[0]) {
 			//has ref override(s)
-			I32 bitSize = (I32)(*(U32 *)pOverrideStart >> 1) * 8 - sizeof(U32);
+			I32 bitSize = ((I32)(*(U32 *)pOverrideStart >> 1) - sizeof(U32)) * 8;
 			pixioByteArrWrite(pAlloc, &overrideBuf, &(bool){true}, 1);
 			pixioByteArrAlign(&overrideBuf);
 			pixioByteArrWrite(pAlloc, &overrideBuf, pOverrideStart + sizeof(U32), bitSize);
@@ -809,6 +809,7 @@ PixErr compileStructLogs(
 	PIX_ERR_ASSERT("", !pStageData->nextBitIdx);
 	I64 instCountStart = pStageData->byteIdx;
 	pixioByteArrWrite(&pCtx->alloc, pStageData, &(I32){0}, BITLEN(LOG_INST_COUNT));
+	I32 instCount = 0;
 	OutInstIter instIter = {0};
 	outInstIterInit(pCtx, pStage, structIdx, &instIter);
 	for (; !outInstIterAtEnd(&instIter); outInstIterInc(&instIter)) {
@@ -816,6 +817,7 @@ PixErr compileStructLogs(
 		if (!structCount) {
 			continue;
 		}
+		++instCount;
 		*pItemTotal += structCount;
 		err = compileInstLogs(
 			&instIter,
@@ -828,7 +830,7 @@ PixErr compileStructLogs(
 		*pRangeTotal += pRangeBuf->count;
 	}
 	PIX_ERR_ASSERT("", BITLEN(LOG_INST_COUNT) / 8 == sizeof(I32));
-	*(I32 *)&pStageData->pArr[instCountStart] = instIter.inst;
+	*(I32 *)&pStageData->pArr[instCountStart] = instCount;
 	return err;
 }
 
@@ -996,6 +998,8 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 	stageData.byteIdx += headerSize;
 	I32 structsLogged = 0;
 	for (I32 i = 0 ; i < pStage->structCount; ++i) {
+		I32 itemTotalPre = itemTotal;
+		I64 bytePre = stageData.byteIdx;
 		err = compileStructLogs(
 			pCtx,
 			pStage,
@@ -1007,9 +1011,14 @@ PixErr carkOutStageEnd(CarkOutCtx *pCtx, I32 stageIdx, bool compress) {
 			&itemTotal
 		);
 		PIX_ERR_THROW_IFNOT(err, "", 1);
+		PIX_ERR_ASSERT("", !stageData.nextBitIdx);
+		if (itemTotal == itemTotalPre) {
+			stageData.byteIdx = bytePre;
+			continue;
+		}
+		PIX_ERR_ASSERT("", itemTotal >= itemTotalPre);
 		++structsLogged;
 	}
-	PIX_ERR_ASSERT("", !stageData.nextBitIdx);
 	memcpy(stageData.pArr, &structsLogged, headerSizeArr[0]);
 	I32 headerPtr = headerSizeArr[0];
 	memcpy(stageData.pArr + headerPtr, &rangeTotal, headerSizeArr[1]);
@@ -1323,6 +1332,7 @@ PixErr decodeStages(CarkInCtx *pCtx, CarkInFile *pFile) {
 	I32 compTotal = 0;
 	for (I32 i = 0; i < pFile->stageArr.count; ++i) {
 		CarkStage *pStage = pFile->stageArr.pArr + i;
+		*pStage = (CarkStage){.idx = i};
 		pixioByteArrReadStr(pBuf, pStage->name, CARK_NAME_LEN_MAX);
 		pixioByteArrRead(pBuf, &pStage->logInfo.bufStart, BITLEN(STAGE_BUF_START));
 		pixioByteArrRead(pBuf, &pStage->logInfo.bufCompressSize, BITLEN(STAGE_BUF_SIZE_DEFL));
@@ -1468,7 +1478,8 @@ void decodeOverride(PixioByteArr *pBuf, CarkOverride *pOverride) {
 	pixioByteArrRead(pBuf, &hasOverride, 1);
 	I16 val = 0;
 	if (hasOverride) {
-		pixioByteArrRead(pBuf, &val, 16);
+		pixioByteArrRead(pBuf, &val, 15);
+		val = val == 0x7fff ? -1 : val;
 	}
 	if (pOverride) {
 		*pOverride = (CarkOverride){.override = hasOverride, .val = val};
@@ -1574,11 +1585,13 @@ PixErr decodeInstLog(
 	PIX_ERR_RETURN_IFNOT(err, "");
 	I32 rangeCount = 0;
 	pixioByteArrRead(&pMem->buf, &rangeCount, BITLEN(LOG_RANGE_COUNT));
+	PIX_ERR_ASSERT("", rangeCount <= pInstLog->count);
 	I32 offset = 0;
 	for (I32 j = 0; j < rangeCount; ++j) {
 		PixtyRange range = {0};
 		pixioByteArrRead(&pMem->buf, &range.start, BITLEN(LOG_RANGE_STARTEND));
 		pixioByteArrRead(&pMem->buf, &range.end, BITLEN(LOG_RANGE_STARTEND));
+		PIX_ERR_ASSERT("", range.start < range.end);
 		CarkItemRange *pItemRange = NULL;
 		err = pixuctAvlAdd(
 			&pInstLog->rangeTree,
@@ -1654,8 +1667,8 @@ PixErr decodeLog(
 		structsLogged > 0 && rangeTotal > 0 && dataTotal > 0,
 		"log empty or corrupt"
 	);
-	PIXALC_DYN_ARR_RESIZE(CarkInStructLog, &pCtx->alloc, &pLog->structs, structsLogged);
-	PIXALC_DYN_ARR_RESIZE(CarkOverrideIdx, &pCtx->alloc, &pLog->overrideTable, itemTotal);
+	PIXALC_DYN_ARR_RESIZE_ZERO(CarkInStructLog, &pCtx->alloc, &pLog->structs, structsLogged);
+	PIXALC_DYN_ARR_RESIZE_ZERO(CarkOverrideIdx, &pCtx->alloc, &pLog->overrideTable, itemTotal);
 	PIXALC_DYN_ARR_RESIZE(U8, &pCtx->alloc, &pLog->dataMem, dataTotal);
 	pixalcLinAllocInit(
 		&pCtx->alloc,
@@ -1681,8 +1694,8 @@ PixErr decodeLog(
 			&pStructLog->instArr,
 			pStructLog->instArr.count
 		);
-		for(I32 i = 0; i < pStructLog->instArr.count; ++i) {
-			CarkInInstLog *pInstLog =  pStructLog->instArr.pArr + i;
+		for(I32 j = 0; j < pStructLog->instArr.count; ++j) {
+			CarkInInstLog *pInstLog =  pStructLog->instArr.pArr + j;
 			err = decodeInstLog(pCtx, pStage, pLog, pInstLog, pStructLog->idx);
 			PIX_ERR_RETURN_IFNOT(err, "");
 		}
@@ -1799,6 +1812,22 @@ void setIfOverridden(I32 *pDest, CarkOverride override) {
 	}
 }
 
+static
+void refMakeAbs(CarkInRef *pRef, CarkInRef active) {
+	if (pRef->ref.stageIdx == -1) {
+		pRef->ref.stageIdx = active.ref.stageIdx;
+	}
+	if (pRef->ref.structIdx == -1) {
+		pRef->ref.structIdx = active.ref.structIdx;
+	}
+	if (pRef->ref.compIdx == -1) {
+		pRef->ref.compIdx = active.ref.compIdx;
+	}
+	if (pRef->inst == -1) {
+		pRef->inst = active.inst;
+	}
+}
+
 PixErr carkInCompRefsGet(
 	const CarkInStageLog *pLog,
 	const CarkStage *pStage,
@@ -1818,17 +1847,23 @@ PixErr carkInCompRefsGet(
 	PIX_ERR_RETURN_IFNOT(err, "");
 	const CarkStructInfo *pStructInfo = &pStage->pStructArr[ref.ref.structIdx].info;
 	const CarkCompInfo *pCompInfo = pStructInfo->pCompArr + ref.ref.compIdx;
-	memcpy(pRefArr->arr, pCompInfo->refArr, sizeof(pRefArr->arr));
-	pRefArr->count = pCompInfo->refCount;
-	for (I32 i = 0; i < overrideArr.count; ++i) {
-		CarkRefOverride *pOverride = overrideArr.arr + i;
+	I32 overrideIdx = 0;
+	for (I32 i = 0; i < pCompInfo->refCount; ++i) {
+		CarkInRef *pRefEntry = pRefArr->arr + i;
+		pRefEntry->ref = pCompInfo->refArr[i];
+		pRefEntry->inst = ref.inst;
+
+		CarkRefOverride *pOverride = overrideArr.arr + overrideIdx;
 		PIX_ERR_ASSERT("", pOverride->refIdx < pCompInfo->refCount);
-		CarkInRef *pRef = pRefArr->arr + pOverride->refIdx;
-		setIfOverridden(&pRef->ref.stageIdx, pOverride->stageIdx);
-		setIfOverridden(&pRef->ref.structIdx, pOverride->structIdx);
-		setIfOverridden(&pRef->ref.compIdx, pOverride->compIdx);
-		setIfOverridden(&pRef->inst, pOverride->inst);
+		if (i == pOverride->refIdx) {
+			setIfOverridden(&pRefEntry->ref.stageIdx, pOverride->stageIdx);
+			setIfOverridden(&pRefEntry->ref.structIdx, pOverride->structIdx);
+			setIfOverridden(&pRefEntry->ref.compIdx, pOverride->compIdx);
+			setIfOverridden(&pRefEntry->inst, pOverride->inst);
+		}
+		refMakeAbs(pRefEntry, ref);
 	}
+	pRefArr->count = pCompInfo->refCount;
 	return err;
 }
 
@@ -1854,10 +1889,10 @@ PixErr carkInLogIdx(
 		*pItem = (CarkInLogItem){0};
 		return err;
 	}
-	I64 byteIdx = (I64)loggedIdx * pStage->pStructArr[structIdx].byteSize;
 
 	const CarkInStructLog *pStructLog = pLog->structs.pArr + structIdx;
 	const CarkInInstLog *pInstLog = pStructLog->instArr.pArr + inst;
+	I64 byteIdx = (I64)loggedIdx * pInstLog->byteSize;
 	const U8 *pData = pLog->dataMem.pArr + pInstLog->dataIdx + byteIdx;
 	*pItem = (CarkInLogItem){
 		.timestamp = *(CARK_TIMESTAMP_TYPE *)pData,

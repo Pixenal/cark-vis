@@ -307,7 +307,8 @@ PixErr carkGuiLayout(
 
 	if (ImGui::Begin("Log", NULL, ImGuiWindowFlags_None)) {
 		I32 stageIdx = pSession->activeStage;
-		if (stageIdx != -1 && pSession->info.pStageArr) {
+		ImGui::Text("log hidden");
+		if (false && stageIdx != -1 && pSession->info.pStageArr) {
 			PIX_ERR_ASSERT("", stageIdx < pSession->info.pStageArr->count);
 			const CarkInStageLog *pStageLog = pSession->logArr.pArr + stageIdx;
 			const CarkStage *pStageInfo = pSession->info.pStageArr->pArr + stageIdx;

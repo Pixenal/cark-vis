@@ -321,7 +321,7 @@ typedef struct CarkInInstLog {
 	PixuctAvl rangeTree;
 	int32_t count;
 	int32_t overrideIdx;
-	int32_t byteSize;
+	int32_t byteSize;//TODO this should be in inStructLog, if at all
 } CarkInInstLog;
 
 typedef struct CarkInInstLogArr {
