@@ -596,23 +596,28 @@ void drawViewport(const Session *pSession, const View *pView, const Viewport *pV
 		.pitch = pView->pitch,
 		.camDist = pView->camDist
 	};
-	const GpuMesh *pMesh;
+	//TODO wrap viewport->geo in mesh arr and remove cast to non-const
+	GpuMeshArr fallback = {.pArr = {(GpuMesh *)&pViewport->geo}, .count = 1};
+	const GpuMeshArr *pMeshArr = &fallback;
 	if (stageMeshIsValid(pSession)) {
 		I32 stageIdx = pSession->stageMeshArr.pTable[pSession->activeStage].idx;
 		const StageMesh *pStageMesh = pSession->stageMeshArr.pArr + stageIdx;
-		pMesh = pStageMesh->instMeshArr.pArr + pSession->activeInst;
-		PIX_ERR_ASSERT("", pMesh->triCount >= 0);
+		pMeshArr = &pStageMesh->instMeshArr;
 	}
-	else {
-		pMesh = &pViewport->geo;
-	}
-	glBindVertexArray(pMesh->vao);
+	
 	gpuFrameClear(&pViewport->frame);
 	glUseProgram(pViewport->prog);
 	gpuUboBind(&pViewport->ubo, &drawArgs);
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glEnable(GL_DEPTH_TEST);
-	glDrawElements(GL_TRIANGLES, pMesh->triCount * 3, GL_UNSIGNED_INT, NULL);
+	for (I32 i = 0; i < pMeshArr->count; ++i) {
+		const GpuMesh *pMesh = pMeshArr->pArr + i;
+		if (!pMesh->triCount) {
+			continue;
+		}
+		glBindVertexArray(pMesh->vao);
+		glDrawElements(GL_TRIANGLES, pMesh->triCount * 3, GL_UNSIGNED_INT, NULL);
+	}
 }
 
 static
@@ -1163,6 +1168,7 @@ PixErr facePosGet(
 	PIX_ERR_RETURN_IFNOT(err, "");
 	const CarkInInstLog *pPosLog = NULL;
 	err = instLogFromRef(pSession, posRef, &pPosLog);
+	PIX_ERR_RETURN_IFNOT(err, "");
 
 	VertRedir *pEntry = NULL;
 	VertKey key = {.logIdx = vertIdx, .ref = posRef};
@@ -1352,7 +1358,7 @@ PixErr meshFromLog(
 			I32 itemIdx = pRange->idxRange.start + j;
 			I32 loggedIdx = pRange->startItem + j;
 			I32 byteIdx = loggedIdx * (CARK_TIMESTAMP_SIZE + pFaceInfo->byteSize);
-			const U8 *pData = pStageLog->dataMem.pArr + byteIdx;
+			const U8 *pData = pStageLog->dataMem.pArr + pFaceLog->dataIdx + byteIdx;
 			//TODO assuming components before size comp are i32,
 			//put a func in io lib to get byte offset of a component idx
 			//(accounting for byte size of other components in struct)
@@ -1383,6 +1389,9 @@ PixErr meshFromLog(
 			meshAddFace(pMesh, faceRange, pCornerBuf, pPosBuf, &vertTable);
 		}
 		faceOffset += rangeSize;
+	}
+	if (!pMesh->faces.count) {
+		return err;
 	}
 	PIXALC_DYN_ARR_RESIZE(I32, &alloc, &pMesh->faces, pMesh->faces.count + 1);
 	pMesh->faces.pArr[pMesh->faces.count] = pMesh->corners.count;
@@ -1499,6 +1508,10 @@ PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh, I32 stage, I32 inst) 
 	StageMesh *pStageMesh = pSession->stageMeshArr.pArr + pIdx->idx;
 	PIXALC_DYN_ARR_RESIZE(GpuMesh, &alloc, &pStageMesh->instMeshArr, inst + 1);
 	pStageMesh->instMeshArr.count = inst + 1;
+	if (!pMesh->corners.count) {
+		pStageMesh->instMeshArr.pArr[0] = (GpuMesh){0};
+		return err;
+	}
 	gpuMeshInit(
 		3,
 		pMesh->pos.count * sizeof(PixtyV3_F32),
@@ -1575,11 +1588,13 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		err = stageLogFromRef(pSession, faceRef.stageIdx, &pStageLog);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		const CarkInStructLog *pFaceLog = pStageLog->structs.pArr + faceRef.structIdx;
-		for (I32 j = 0; j < 1/*pFaceLog->instArr.count*/; ++j) {
+		for (I32 j = 0; j < pFaceLog->instArr.count; ++j) {
 			err = meshFromLog(pSession, pStage, j, contains, &cornerBuf, &posBuf, &mesh);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
-			err = meshTriangulate(&mesh);
-			PIX_ERR_THROW_IFNOT(err, "", 0);
+			if (mesh.faces.count) {
+				err = meshTriangulate(&mesh);
+				PIX_ERR_THROW_IFNOT(err, "", 0);
+			}
 			err = meshLoadOnGpu(pSession, &mesh, i, j);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			meshClear(&mesh);
