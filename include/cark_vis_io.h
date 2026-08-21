@@ -316,12 +316,18 @@ typedef struct CarkCompInfoArr {
 	int32_t size;
 } CarkCompInfoArr;
 
+typedef struct CarkTimeframe {
+	int64_t start;
+	int64_t duration;
+} CarkTimeframe;
+
 typedef struct CarkInInstLog {
 	int64_t dataIdx;
 	PixuctAvl rangeTree;
 	int32_t count;
 	int32_t overrideIdx;
 	int32_t byteSize;//TODO this should be in inStructLog, if at all
+	CarkTimeframe timeframe;
 } CarkInInstLog;
 
 typedef struct CarkInInstLogArr {
@@ -362,6 +368,7 @@ typedef struct CarkOverrideIdxArr {
 typedef struct CarkInStageLog {
 	//struct-arr is sparse, containing only structs that were logged.
 	CarkInStructLogArr structs;
+	CarkTimeframe timeframe;
 	PixalcLinAlloc rangeMem;
 	PixtyU8Arr dataMem;//using single arr to make potential future compression easier
 	CarkOverrideIdxArr overrideTable; 
@@ -370,8 +377,7 @@ typedef struct CarkInStageLog {
 
 typedef struct CarkInFile {
 	PixioFile file;
-	int64_t timeStart;
-	int64_t duration;
+	CarkTimeframe timeframe;
 	CarkStageArr stageArr;
 	CarkStructArr structArr;
 	CarkCompInfoArr compArr;

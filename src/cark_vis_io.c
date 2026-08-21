@@ -118,6 +118,11 @@ void fileTypeSizeInit() {
 	BITLEN(LOG_TIMESTAMP) = CARK_TIMESTAMP_SIZE * 8;
 }
 
+static
+void threadClear(CarkThread *pThread) {
+	*pThread = (CarkThread){.stageArr = pThread->stageArr, .activeLogStage = -1};
+}
+
 PixErr carkOutInit(
 	const PixalcFPtrs *pAlloc,
 	const PixioFPtrs *pIo,
@@ -138,7 +143,7 @@ PixErr carkOutInit(
 		.pThreadArr = pAlloc->fpCalloc(threadCount, sizeof(CarkThread))
 	};
 	for (I32 i = 0; i < pCtx->threadCount; ++i) {
-		pCtx->pThreadArr[i].activeLogStage = -1;
+		threadClear(pCtx->pThreadArr + i);
 	}
 	pixalcLinAllocInit(pAlloc, &pCtx->compAlloc, sizeof(CarkCompInfo), 8, false);
 	pixalcLinAllocInit(pAlloc, &pCtx->structAlloc, sizeof(CarkStruct), 4, false);
@@ -1125,14 +1130,17 @@ PixErr encodeHeader(
 	const PixalcFPtrs *pAlloc = &pCtx->alloc;
 
 	{
-		I64 timestampFirst = 0;
-		I64 timestampLast = INT64_MAX;
+		I64 timestampFirst = INT64_MAX;
+		I64 timestampLast = INT64_MIN;
 		for (I32 i = 0; i < pCtx->threadCount; ++i) {
 			const CarkThread *pThread = pCtx->pThreadArr + i;
-			if (pThread->timeFirst > timestampFirst) {
+			if (!pThread->timeFirst) {
+				continue;
+			}
+			if (pThread->timeFirst < timestampFirst) {
 				timestampFirst = pThread->timeFirst;
 			}
-			if (pThread->timeLast && pThread->timeLast < timestampLast) {
+			if (pThread->timeLast > timestampLast) {
 				timestampLast = pThread->timeLast;
 			}
 		}
@@ -1234,6 +1242,7 @@ void carkOutClear(CarkOutCtx *pCtx) {
 		for (I32 j = 0; j < pCtx->stageArr.count; ++j) {
 			stageLogDestroy(pCtx, pCtx->pThreadArr[i].stageArr.pArr + j);
 		}
+		threadClear(pCtx->pThreadArr + i);
 	}
 	for (I32 i = 0; i < pCtx->stageArr.count; ++i) {
 		pCtx->stageArr.pArr[i].logInfo = (CarkLogInfo){0};
@@ -1393,8 +1402,8 @@ PixErr decodeHeader(CarkInCtx *pCtx, I64 size, CarkInFile *pFile) {
 	);
 	PIX_ERR_RETURN_IFNOT(err, "");
 
-	pixioByteArrRead(&pMem->buf, &pFile->timeStart, BITLEN(LOG_TIMESTAMP));
-	pixioByteArrRead(&pMem->buf, &pFile->duration, BITLEN(LOG_TIMESTAMP));
+	pixioByteArrRead(&pMem->buf, &pFile->timeframe.start, BITLEN(LOG_TIMESTAMP));
+	pixioByteArrRead(&pMem->buf, &pFile->timeframe.duration, BITLEN(LOG_TIMESTAMP));
 	err = decodeStages(pCtx, pFile);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	return err;
@@ -1587,21 +1596,12 @@ PixuctCmp rangeCmp(const PixuctAvlNodeCore *pACore, const void *pBRaw) {
 }
 
 static
-PixErr decodeInstLog(
-	CarkInCtx *pCtx,
-	const CarkStage *pStage,
+PixErr inInstRangeLoad(
 	CarkInStageLog *pLog,
-	CarkInInstLog *pInstLog,
-	I32 structIdx
+	CarkInLoadMem *pMem,
+	CarkInInstLog *pInstLog
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
-	CarkInLoadMem *pMem = &pCtx->mem;
-	*pInstLog = (CarkInInstLog) {
-		.byteSize = structByteSize(pStage->pStructArr + structIdx, false),
-		.dataIdx = pLog->dataMem.count
-	};
-	pixioByteArrRead(&pMem->buf, &pInstLog->count, BITLEN(LOG_COUNT));
-
 	err = pixuctAvlInit(&pInstLog->rangeTree, &pLog->rangeMem);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	I32 rangeCount = 0;
@@ -1629,10 +1629,65 @@ PixErr decodeInstLog(
 		};
 		offset += range.end - range.start;
 	}
+	return err;
+}
+
+static
+void inInstLogDataLoad(
+	CarkInStageLog *pLog,
+	I64 *pStageTimeEnd,
+	CarkInLoadMem *pMem,
+	CarkInInstLog *pInstLog
+) {
 	I64 dataSize = pInstLog->count * pInstLog->byteSize;
 	pLog->dataMem.count += dataSize;
 	PIX_ERR_ASSERT("", pLog->dataMem.count <= pLog->dataMem.size);
-	pixioByteArrRead(&pMem->buf, pLog->dataMem.pArr + pInstLog->dataIdx, dataSize * 8);
+	I64 offset = pInstLog->dataIdx;
+	I64 timeEnd = INT64_MIN;
+	for (I32 i = 0; i < pInstLog->count; ++i) {
+		pixioByteArrRead(&pMem->buf, pLog->dataMem.pArr + offset, pInstLog->byteSize * 8);
+		I64 timestamp = *(I64 *)&pLog->dataMem.pArr[offset];
+		if (timestamp < pInstLog->timeframe.start) {
+			pInstLog->timeframe.start = timestamp;
+		}
+		if (timestamp > timeEnd) {
+			timeEnd = timestamp;
+		}
+		offset += pInstLog->byteSize;
+	}
+	PIX_ERR_ASSERT("", offset - pInstLog->dataIdx == dataSize);
+	pInstLog->timeframe.duration = timeEnd - pInstLog->timeframe.start;
+	if (pInstLog->timeframe.start < pLog->timeframe.start) {
+		pLog->timeframe.start = pInstLog->timeframe.start;
+	}
+	if (timeEnd > *pStageTimeEnd) {
+		*pStageTimeEnd = timeEnd;
+	}
+}
+
+static
+PixErr decodeInstLog(
+	CarkInCtx *pCtx,
+	CarkInFile *pFile,
+	const CarkStage *pStage,
+	CarkInStageLog *pLog,
+	I64 *pStageTimeEnd,
+	CarkInInstLog *pInstLog,
+	I32 structIdx
+) {
+	PixErr err = PIX_ERR_SUCCESS;
+	CarkInLoadMem *pMem = &pCtx->mem;
+	*pInstLog = (CarkInInstLog) {
+		.byteSize = structByteSize(pStage->pStructArr + structIdx, false),
+		.dataIdx = pLog->dataMem.count,
+		.timeframe.start = INT64_MAX
+	};
+	pixioByteArrRead(&pMem->buf, &pInstLog->count, BITLEN(LOG_COUNT));
+	PIX_ERR_RETURN_IFNOT_COND(err, pInstLog->count > 0, "");
+
+	err = inInstRangeLoad(pLog, pMem, pInstLog);
+	PIX_ERR_RETURN_IFNOT(err, "");
+	inInstLogDataLoad(pLog, pStageTimeEnd, pMem, pInstLog);
 	I64 overrideSize = 0;
 	pixioByteArrRead(&pMem->buf, &overrideSize, BITLEN(LOG_OVERRIDE_SIZE));
 	I64 overrideStart = pLog->dataMem.count;
@@ -1669,12 +1724,14 @@ void inStructLogResize(const PixalcFPtrs *pAlloc, CarkInStructLog *pLog, I32 ins
 	pLog->instArr.count = minSize;
 }
 
+//TODO be more consistent with naming, like verb and noun order, etc
 static
 PixErr decodeLog(
 	CarkInCtx *pCtx,
 	const CarkStage *pStage,
 	CarkInFile *pFile,
-	CarkInStageLog *pLog
+	CarkInStageLog *pLog,
+	I64 *pStageTimeEnd
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	CarkInLoadMem *pMem = &pCtx->mem;
@@ -1732,7 +1789,15 @@ PixErr decodeLog(
 			pixioByteArrRead(&pMem->buf, &instIdx, BITLEN(LOG_INST_COUNT));
 			inStructLogResize(&pCtx->alloc, pStructLog, instIdx);
 			CarkInInstLog *pInstLog = pStructLog->instArr.pArr + instIdx;
-			err = decodeInstLog(pCtx, pStage, pLog, pInstLog, pStructLog->idx);
+			err = decodeInstLog(
+				pCtx,
+				pFile,
+				pStage,
+				pLog,
+				pStageTimeEnd,
+				pInstLog,
+				pStructLog->idx
+			);
 			PIX_ERR_RETURN_IFNOT(err, "");
 		}
 	}
@@ -1763,8 +1828,14 @@ PixErr loadLog(
 	err = pCtx->io.fpPosSet(&pFile->file, logStart + pStage->logInfo.bufStart);
 	err = pCtx->io.fpRead(&pFile->file, pMem->bufRaw.pArr, pMem->bufRaw.count);
 	PIX_ERR_RETURN_IFNOT(err, "");
-	err = decodeLog(pCtx, pStage, pFile, pLog);
+	*pLog = (CarkInStageLog){
+		.idx = pStage->idx,
+		.timeframe.start = INT64_MAX
+	};
+	I64 timeEnd = INT64_MIN;
+	err = decodeLog(pCtx, pStage, pFile, pLog, &timeEnd);
 	PIX_ERR_RETURN_IFNOT(err, "");
+	pLog->timeframe.duration = timeEnd - pLog->timeframe.start;
 	return err;
 }
 
@@ -1949,7 +2020,6 @@ PixErr carkInFileLoadLog(
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PIX_ERR_RETURN_IFNOT_COND(err, pFile->file.pFile, "");
-	*pLog = (CarkInStageLog){.idx = stageIdx};
 	const CarkStage *pStage = pFile->stageArr.pArr + stageIdx;
 	err = loadLog(pCtx, pFile, pStage, pLog);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
