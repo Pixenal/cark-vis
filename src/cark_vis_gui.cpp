@@ -224,6 +224,13 @@ void infoList(Session *pSession, CarkGuiState *pGui) {
 	}
 }
 
+static
+void setIfActiveWindow(CarkGuiState *pGui, CarkGuiWindow window) {
+	if (ImGui::IsWindowHovered()) {
+		pGui->activeWindow = window;
+	}
+}
+
 PixErr carkGuiLayout(
 	Session *pSession,
 	PixtyV2_I32 windowSize,
@@ -267,6 +274,8 @@ PixErr carkGuiLayout(
 	}
 	ImGui::DockSpaceOverViewport(dockId, pViewport, ImGuiDockNodeFlags_PassthruCentralNode);
 
+	pGui->activeWindow = CARK_GUI_WINDOW_NONE;
+
 	ImGuiWindowFlags windowFlags{
 		ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove |
@@ -275,13 +284,16 @@ PixErr carkGuiLayout(
 		ImGuiWindowFlags_MenuBar
 	};
 	if (ImGui::BeginMainMenuBar()) {
+		setIfActiveWindow(pGui, CARK_GUI_WINDOW_MENUBAR);
 		if (ImGui::BeginMenu("File")) {
+			setIfActiveWindow(pGui, CARK_GUI_WINDOW_MENUBAR);
 			if (ImGui::Button("Open Log")) {
 				eventQueuePush(pQueue, CARK_GUI_EVENT_FILE_OPEN);
 			}
 			ImGui::EndMenu();
 		}
 		if (ImGui::BeginMenu("Help")) {
+			setIfActiveWindow(pGui, CARK_GUI_WINDOW_MENUBAR);
 			if (ImGui::Button("Readme")) {
 				eventQueuePush(pQueue, CARK_GUI_EVENT_README);
 			}
@@ -293,6 +305,7 @@ PixErr carkGuiLayout(
 	
 	ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{.15f, .15f, .15f, 1.0f});
 	if (ImGui::Begin("Info", NULL, ImGuiWindowFlags_None)) {
+		setIfActiveWindow(pGui, CARK_GUI_WINDOW_INFO);
 		float labelWidthBase = ImGui::GetFontSize() * 12;
 		float labelWidthMax = ImGui::GetContentRegionAvail().x * .4f;
 		ImGui::PushItemWidth(
@@ -306,6 +319,7 @@ PixErr carkGuiLayout(
 	}
 
 	if (ImGui::Begin("Log", NULL, ImGuiWindowFlags_None)) {
+		setIfActiveWindow(pGui, CARK_GUI_WINDOW_LOG);
 		I32 stageIdx = pSession->activeStage;
 		ImGui::Text("log hidden");
 		if (false && stageIdx != -1 && pSession->info.pStageArr) {
@@ -340,6 +354,7 @@ PixErr carkGuiLayout(
 	}
 
 	if (ImGui::Begin("Timeline", NULL, ImGuiWindowFlags_None)) {
+		setIfActiveWindow(pGui, CARK_GUI_WINDOW_TIMELINE);
 		ImGui::Text("test a");
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{.0f, .0f});
 		ImVec2 size = ImGui::GetContentRegionAvail();
@@ -349,6 +364,7 @@ PixErr carkGuiLayout(
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_None
 		)) {
+			setIfActiveWindow(pGui, CARK_GUI_WINDOW_TIMELINE);
 			ImVec2 size = ImGui::GetWindowSize();
 			ImGui::Image(
 				(void *)(intptr_t)timelineTex,
@@ -369,6 +385,7 @@ PixErr carkGuiLayout(
 	};
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{.0f, .0f});
 	if(ImGui::Begin("Viewport", NULL, windowFlags)) {
+		setIfActiveWindow(pGui, CARK_GUI_WINDOW_VIEWPORT);
 		ImVec2 size = ImGui::GetWindowSize();
 		ImGui::Image(
 			(void *)(intptr_t)viewportTex,

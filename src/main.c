@@ -777,9 +777,9 @@ void eventHandleForView(
 	SDL_Event *pEvent,
 	Keys *pKeys,
 	View *pView,
-	float sensitivity
+	F32 sensitivity,
+	F32 zoomMin
 ) {
-	float zoomMin = .0f;
 	switch (pEvent->type) {
 		case SDL_EVENT_MOUSE_MOTION:
 			if (pKeys->orbit) {
@@ -856,6 +856,7 @@ void eventHandleForView(
 static
 PixErr eventHandle(
 	PixtyV2_I32 windowSize,
+	CarkGuiWindow activeWindow,
 	SDL_Event *pEvent,
 	bool *pExit,
 	Viewport *pViewport,
@@ -873,8 +874,16 @@ PixErr eventHandle(
 		default:
 			;
 	}
-	eventHandleForView(fWindowSize, pEvent, pKeys, &pViewport->view, 1.0f);
-	eventHandleForView(fWindowSize, pEvent, pKeys, &pTimeline->view, .5f);
+	switch (activeWindow) {
+		case CARK_GUI_WINDOW_VIEWPORT:
+			eventHandleForView(fWindowSize, pEvent, pKeys, &pViewport->view, 1.0f, .0f);
+			break;
+		case CARK_GUI_WINDOW_TIMELINE:
+			eventHandleForView(fWindowSize, pEvent, pKeys, &pTimeline->view, .5f, .00001f);
+			break;
+		default:
+			;
+	}
 	err = carkGuiEvent(pEvent);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	return err;
@@ -1828,15 +1837,6 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	do {
 		PixtyV2_I32 windowSize = {0};
 		SDL_GetWindowSize(pWindow, windowSize.d, windowSize.d + 1);
-		SDL_Event event = {0};
-		bool exit = false;
-		while (SDL_PollEvent(&event)) {
-			err = eventHandle(windowSize, &event, &exit, &viewport, &timeline, &keys);
-			PIX_ERR_THROW_IFNOT(err, "", 0);
-			if (exit) {
-				goto mainLoopExit;
-			}
-		}
 
 		CarkGuiEventQueue guiQueue = {0};
 		err = carkGuiLayout(
@@ -1851,6 +1851,24 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 		for (I32 i = 0; i < guiQueue.count; ++i) {
 			err = guiEventHandle(pWindow, &gui, guiQueue.queue[i]);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
+		}
+
+		SDL_Event event = {0};
+		bool exit = false;
+		while (SDL_PollEvent(&event)) {
+			err = eventHandle(
+				windowSize,
+				gui.activeWindow,
+				&event,
+				&exit,
+				&viewport,
+				&timeline,
+				&keys
+			);
+			PIX_ERR_THROW_IFNOT(err, "", 0);
+			if (exit) {
+				goto mainLoopExit;
+			}
 		}
 
 		err = update(&gui, &session);

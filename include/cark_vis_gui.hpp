@@ -16,6 +16,16 @@ typedef enum CarkGuiEvent {
 	CARK_GUI_EVENT_ENUM_COUNT
 } CarkGuiEvent;
 
+typedef enum CarkGuiWindow {
+	CARK_GUI_WINDOW_NONE,
+	CARK_GUI_WINDOW_MENUBAR,
+	CARK_GUI_WINDOW_INFO,
+	CARK_GUI_WINDOW_LOG,
+	CARK_GUI_WINDOW_VIEWPORT,
+	CARK_GUI_WINDOW_TIMELINE,
+	CARK_GUI_WINDOW_ENUM_COUNT
+} CarkGuiWindow;
+
 typedef struct CarkGuiEventQueue {
 	CarkGuiEvent queue[CARK_GUI_EVENT_QUEUE_MAX];
 	int32_t count;
@@ -26,6 +36,7 @@ typedef struct CarkGuiState {
 	volatile bool fileDialogActive;
 	char *pFileDialogPath;
 	uint32_t iconArr[ICON_COUNT];
+	CarkGuiWindow activeWindow;
 } CarkGuiState;
 
 #ifdef __cplusplus
