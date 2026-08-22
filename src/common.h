@@ -87,6 +87,7 @@ PixErr avlIterInitConst(const PixuctAvl *pHandle, PixuctAvlIter *pIter);
 bool avlIterAtEnd(const PixuctAvlIter *pIter);
 void avlIterInc(PixuctAvlIter *pIter);
 const PixuctAvlNodeCore *avlIterGetItemConst(PixuctAvlIter *pIter);
+const void *linAllocIdxConst(const PixalcLinAlloc *pHandle, I32 idx);
 #ifdef __cplusplus
 }
 #endif

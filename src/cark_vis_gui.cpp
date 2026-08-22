@@ -82,29 +82,22 @@ void drawIcon(const CarkGuiState *pGui, Icon icon) {
 
 static
 PixErr logRow(
-	const CarkInStageLog *pStageLog,
 	const CarkStruct *pStructInfo,
-	const CarkItemRange  *pRange,
-	I32 idxInRange
+	CarkInLogItem item,
+	I32 itemIdx
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	ImGui::TableNextRow();
-	I32 idx = pRange->startItem + idxInRange;
-	I64 byteIdx = idx * (CARK_TIMESTAMP_SIZE + pStructInfo->byteSize);
-	const U8 *pData = pStageLog->dataMem.pArr + byteIdx;
-	CARK_TIMESTAMP_TYPE timestamp = 0;
-	timestamp = *(CARK_TIMESTAMP_TYPE *)pData;
-	pData += CARK_TIMESTAMP_SIZE;
 	if (ImGui::TableSetColumnIndex(0)) {
-		ImGui::Text("%p", timestamp);
+		ImGui::Text("%p", item.timestamp);
 	}
 	if (ImGui::TableSetColumnIndex(1)) {
-		ImGui::Text("%d", pRange->idxRange.start + idxInRange);
+		ImGui::Text("%d", itemIdx);
 	}
 	for (I32 k = 0; k < pStructInfo->info.compCount; ++k) {
 		const CarkCompInfo *pCompInfo = pStructInfo->info.pCompArr + k;
-		const void *pVal = pData;
-		pData += carkTypeSizeGet(pCompInfo->type);
+		const void *pVal = item.pData;
+		item.pData += carkTypeSizeGet(pCompInfo->type);
 		if (!ImGui::TableSetColumnIndex(2 + k)) {
 			continue;
 		}
@@ -156,8 +149,9 @@ PixErr logRow(
 
 static
 PixErr logTable(
+	const CarkStage *pStageInfo,
 	const CarkInStageLog *pStageLog,
-	const CarkInInstLog *pInstLog,
+	CarkInRef ref,
 	const CarkStruct *pStructInfo
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
@@ -169,18 +163,22 @@ PixErr logTable(
 	}
 	ImGui::TableHeadersRow();
 	I32 offset = 0;
-	PixuctAvlIter iter = {0};
-	err = avlIterInitConst(&pInstLog->rangeTree, &iter);
+	ImGuiListClipper clipper{};
+	if (!pStageLog->structs.pArr[ref.ref.structIdx].instArr.count) {
+		return err;//struct log is empty
+	}
+	const CarkInInstLog *pInstLog = NULL;
+	err = carkInInstLogFromRef(pStageLog, ref, &pInstLog);
 	PIX_ERR_RETURN_IFNOT(err, "");
-	for (; !avlIterAtEnd(&iter); avlIterInc(&iter)) {
-		const CarkItemRange *pRange = (CarkItemRange *)avlIterGetItemConst(&iter);
-		I32 rangeSize = pRange->idxRange.end - pRange->idxRange.start;
-		for (I32 j = 0; j < rangeSize; ++j) {
-			err = logRow(pStageLog, pStructInfo, pRange, j);
+	clipper.Begin(pInstLog->count);
+	while (clipper.Step()) {
+		for (I32 i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+			CarkInLogItem item = {0};
+			carkInLogIdx(pStageLog, pStageInfo, ref.ref.structIdx, ref.inst, i, &item);
+			err = logRow(pStructInfo, item, i);
 			PIX_ERR_RETURN_IFNOT(err, "");
 		}
 	}
-	ImGui::EndTable();
 	return err;
 }
 
@@ -321,8 +319,7 @@ PixErr carkGuiLayout(
 	if (ImGui::Begin("Log", NULL, ImGuiWindowFlags_None)) {
 		setIfActiveWindow(pGui, CARK_GUI_WINDOW_LOG);
 		I32 stageIdx = pSession->activeStage;
-		ImGui::Text("log hidden");
-		if (false && stageIdx != -1 && pSession->info.pStageArr) {
+		if (stageIdx != -1 && pSession->info.pStageArr) {
 			PIX_ERR_ASSERT("", stageIdx < pSession->info.pStageArr->count);
 			const CarkInStageLog *pStageLog = pSession->logArr.pArr + stageIdx;
 			const CarkStage *pStageInfo = pSession->info.pStageArr->pArr + stageIdx;
@@ -332,9 +329,6 @@ PixErr carkGuiLayout(
 				{pSession->activeStage, pSession->activeStruct},
 				pSession->activeInst
 			};
-			const CarkInInstLog *pInstLog = NULL;
-			err = carkInInstLogFromRef(pStageLog, ref, &pInstLog);
-			PIX_ERR_RETURN_IFNOT(err, "");
 			const CarkStruct *pStructInfo = pStageInfo->pStructArr + structIdx;
 			ImGuiTableFlags tableFlags =
 				ImGuiTableFlags_ScrollX |
@@ -346,8 +340,9 @@ PixErr carkGuiLayout(
 				ImGuiTableFlags_NoHostExtendX;
 			I32 columnCount = 2 + pStructInfo->info.compCount;
 			if (ImGui::BeginTable("Comp Log", columnCount, tableFlags, ImVec2{.0f, .0f})) {
-				err = logTable(pStageLog, pInstLog, pStructInfo);
+				err = logTable(pStageInfo, pStageLog, ref, pStructInfo);
 				PIX_ERR_RETURN_IFNOT(err, "");
+				ImGui::EndTable();
 			}
 		}
 		ImGui::End();

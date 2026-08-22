@@ -2148,3 +2148,7 @@ void avlIterInc(PixuctAvlIter *pIter) {
 const PixuctAvlNodeCore *avlIterGetItemConst(PixuctAvlIter *pIter) {
 	return pixuctAvlIterGetItemConst(pIter);
 }
+
+const void *linAllocIdxConst(const PixalcLinAlloc *pHandle, I32 idx) {
+	return pixalcLinAllocIdxConst(pHandle, idx);
+}

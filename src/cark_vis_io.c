@@ -1850,7 +1850,8 @@ PixErr carkInLoggedIdxGet(
 	I32 structIdx,
 	I32 inst,
 	I32 itemIdx,
-	I32 *pLoggedIdx
+	I32 *pLoggedIdx,
+	PixtyRange *pRangeOut
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	const CarkItemRange *pRange = NULL;
@@ -1872,6 +1873,9 @@ PixErr carkInLoggedIdxGet(
 		return err;
 	}
 	*pLoggedIdx = pRange->startItem + itemIdx - pRange->idxRange.start;
+	if (pRangeOut) {
+		*pRangeOut = pRange->idxRange;
+	}
 	return err;
 }
 
@@ -1886,7 +1890,7 @@ PixErr carkInCompRefOverrideGet(
 	*pRefArr = (CarkRefOverrideArr){0};
 
 	I32 loggedIdx = 0;
-	err = carkInLoggedIdxGet(pLog, ref.ref.structIdx, ref.inst, itemIdx, &loggedIdx);
+	err = carkInLoggedIdxGet(pLog, ref.ref.structIdx, ref.inst, itemIdx, &loggedIdx, NULL);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	if (loggedIdx == -1) {
 		return err;
@@ -1994,7 +1998,8 @@ PixErr carkInLogIdx(
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	I32 loggedIdx = 0;
-	err = carkInLoggedIdxGet(pLog, structIdx, inst, itemIdx, &loggedIdx);
+	PixtyRange range = {0};
+	err = carkInLoggedIdxGet(pLog, structIdx, inst, itemIdx, &loggedIdx, &range);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	if (loggedIdx == -1) {
 		*pItem = (CarkInLogItem){0};
@@ -2005,9 +2010,11 @@ PixErr carkInLogIdx(
 	const CarkInInstLog *pInstLog = pStructLog->instArr.pArr + inst;
 	I64 byteIdx = (I64)loggedIdx * pInstLog->byteSize;
 	const U8 *pData = pLog->dataMem.pArr + pInstLog->dataIdx + byteIdx;
+	PIX_ERR_ASSERT("", itemIdx >= range.start && itemIdx < range.end);
 	*pItem = (CarkInLogItem){
 		.timestamp = *(CARK_TIMESTAMP_TYPE *)pData,
-		.pData = pData + CARK_TIMESTAMP_SIZE
+		.pData = pData + CARK_TIMESTAMP_SIZE,
+		.idxInRange = itemIdx - range.start
 	};
 	return err;
 }
