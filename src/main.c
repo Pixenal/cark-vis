@@ -218,6 +218,7 @@ typedef struct TimelineDrawArgs {
 	PixtyV2_F32 offset;
 	PixtyV2_F32 size;
 	PixtyV4_F32 colour;
+	PixtyV2_I32 res;
 	F32 sort;
 	F32 intervals;
 	F32 camDist;
@@ -368,6 +369,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 		.camDist = 1.0f
 	};
 
+	//TODO move shader code into separate files
 	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
 		layout (location = 0) in vec2 vertPos;\
@@ -377,6 +379,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 			vec2 offset;\
 			vec2 size;\
 			vec4 colour;\
+			ivec2 res;\
 			float sort;\
 			float intervals;\
 			float camDist;\
@@ -398,6 +401,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 			vec2 offset;\
 			vec2 size;\
 			vec4 colour;\
+			ivec2 res;\
 			float sort;\
 			float intervals;\
 			float camDist;\
@@ -405,8 +409,12 @@ PixErr timelineInit(Timeline *pTimeline) {
 		};\
 		void main() {\
 			if (intervals == 1.0f) {\
-				float timeInterval = mod(((outPos.x * camDist) - pan * 2.0f) * 10.0f, 1.0f);\
-				if (timeInterval > .02f * camDist) {\
+				float intervalScale = 40.0f;\
+				float timeInterval = mod(((outPos.x * camDist) - pan * 2.0f) * intervalScale, 1.0f);\
+				float minWidth = intervalScale * camDist * 2.0f / float(res.x);\
+				float lineWidth = .02f * camDist;\
+				lineWidth = lineWidth < minWidth ? minWidth : lineWidth;\
+				if (timeInterval > lineWidth) {\
 					 discard;\
 				}\
 			}\
@@ -794,9 +802,6 @@ FTimeframe fTimeFromCarkTimeframe(CarkTimeframe timeframe) {
 
 static
 void drawTimeline(const Session *pSession, Timeline *pTimeline) {
-	if (!pSession->info.pStageArr) {
-		return;
-	}
 	viewResetIfPending(&pTimeline->view, true, 1.0f, (PixtyV3_F32){0});
 
 	F32 aspect =
@@ -813,7 +818,8 @@ void drawTimeline(const Session *pSession, Timeline *pTimeline) {
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	glEnable(GL_DEPTH_TEST);
 
-	FTimeframe timeGlobal = fTimeFromCarkTimeframe(pSession->file.timeframe);
+	FTimeframe timeGlobal = pSession->info.pStageArr ?
+		fTimeFromCarkTimeframe(pSession->file.timeframe) : (FTimeframe){0};
 	F32 stageHeight = 1.0f / pSession->logArr.size;
 	F32 pixelSizeX = 1.0f / (F32)pTimeline->frame.frameSize.d[0];
 	F32 trackPadding = .00125f * aspect;
@@ -857,6 +863,7 @@ void drawTimeline(const Session *pSession, Timeline *pTimeline) {
 		.ortho = orthoMat,
 		.size = {1.0f, 1.0f},
 		.colour = {.2f, .2f, .2f},
+		.res = pTimeline->frame.frameSize,
 		.sort = 4.0f,
 		.intervals = 1.0f,
 		.camDist = pTimeline->view.camDist,
