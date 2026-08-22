@@ -42,7 +42,10 @@ typedef struct GpuMesh {
 	uint32_t vao;
 	uint32_t vbo;
 	uint32_t ebo;
+	int32_t vecSize;
 	int32_t triCount;
+	PixtyV3_F32 centre;
+	F32 size;
 } GpuMesh;
 
 typedef struct GpuMeshArr {
@@ -53,6 +56,8 @@ typedef struct GpuMeshArr {
 
 typedef struct StageMesh {
 	GpuMeshArr instMeshArr;
+	PixtyV3_F32 centre;
+	F32 size;
 } StageMesh;
 
 typedef struct StageMeshArr {

@@ -1,3 +1,5 @@
+#include <float.h>
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <GL/glew.h>
@@ -62,11 +64,18 @@ typedef struct GpuFrame {
 	PixtyV2_I32 frameSize;
 } GpuFrame;
 
+typedef struct KeyPress {
+	bool pressed : 1;
+	bool done : 1;
+} KeyPress;
+
 typedef struct View {
+	PixtyV4_F32 offset;
 	PixtyV2_F32 pan;
 	F32 yaw;
 	F32 pitch;
 	F32 camDist;
+	KeyPress reset;
 } View;
 
 typedef struct Viewport {
@@ -135,6 +144,41 @@ typedef struct Mesh {
 char *pAssetDir = NULL;
 I32 assetDirLen = 0;
 
+//returnes if pending & sets done to true
+static
+bool keyPressCheck(KeyPress *pKeyPress) {
+	if (pKeyPress->pressed && !pKeyPress->done) {
+		pKeyPress->done = true;
+		return true;
+	}
+	return false;
+}
+
+static
+void keyPressDown(KeyPress *pKeyPress) {
+	pKeyPress->pressed = !pKeyPress->done;
+}
+
+static
+void keyPressUp(KeyPress *pKeyPress) {
+	*pKeyPress = (KeyPress){0};
+}
+
+static
+void viewResetIfPending(View *pView, bool resetOrbit, F32 camDist, PixtyV3_F32 offset) {
+	if (keyPressCheck(&pView->reset)) {
+		pView->offset.d[0] = offset.d[0];
+		pView->offset.d[1] = offset.d[1];
+		pView->offset.d[2] = offset.d[2];
+		pView->camDist = camDist;
+		pView->pan = (PixtyV2_F32){0};
+		if (resetOrbit) {
+			pView->yaw = .0f;
+			pView->pitch = .0f;
+		}
+	}
+}
+
 static
 void shaderLogPrint(GLuint shader) {
 	if (!glIsShader(shader)) {
@@ -159,6 +203,7 @@ void shaderLogPrint(GLuint shader) {
 typedef struct ViewportDrawArgs {
 	PixtyM4x4 persp;
 	PixtyM4x4 view;
+	PixtyV4_F32 offset;
 	PixtyV2_F32 pan;
 	F32 yaw;
 	F32 pitch;
@@ -169,7 +214,7 @@ typedef struct TimelineDrawArgs {
 	PixtyM4x4 ortho;
 	PixtyV2_F32 offset;
 	PixtyV2_F32 size;
-	PixtyV3_F32 colour;
+	PixtyV4_F32 colour;
 	F32 sort;
 	F32 intervals;
 	F32 camDist;
@@ -240,17 +285,63 @@ void gpuUboInit(GLuint prog, const GLchar *pName, I32 size, I32 location, GpuUbo
 	glUniformBlockBinding(prog, pUbo->uboIdx, pUbo->uboBind);
 }
 
+typedef struct Bb {
+	PixtyV3_F32 min;
+	PixtyV3_F32 max;
+} Bb;
+
+static
+void bbInit(Bb *pBb) {
+	*pBb = (Bb) {
+		.min = {FLT_MAX, FLT_MAX, FLT_MAX},
+		.max = {-FLT_MAX, -FLT_MAX, -FLT_MAX}
+	};
+}
+
+static
+void bbContrib(Bb *pBb, const PixtyV3_F32 *pPos, I32 vecSize) {
+	for (I32 i = 0; i < vecSize; ++i) {
+		pBb->min.d[i] = pPos->d[i] < pBb->min.d[i] ? pPos->d[i] : pBb->min.d[i];
+		pBb->max.d[i] = pPos->d[i] > pBb->max.d[i] ? pPos->d[i] : pBb->max.d[i];
+	}
+}
+
+static
+void bbGetCentreAndSize(const Bb *pBb, I32 vecSize, PixtyV3_F32 *pCentre, F32 *pSize) {
+	PixtyV3_F32 halfVec = _(_(pBb->max V3SUB pBb->min) V3DIVS 2.0f);
+	F32 squareDist = 0;
+	for (I32 i = 0; i < vecSize; ++i) {
+		squareDist += halfVec.d[i] * halfVec.d[i];
+	}
+	*pCentre = _(halfVec V3ADD pBb->min);
+	*pSize = sqrtf(squareDist);
+}
+
 static
 void gpuMeshInit(
 	I32 vecSize,
 	I32 posArrSize,
-	GLfloat *pPosArr,
+	const GLfloat *pPosArr,
 	I32 cornerArrSize,
-	GLuint *pCornerArr,
+	const GLuint *pCornerArr,
 	I32 triCount,
-	GpuMesh *pMesh
+	GpuMesh *pMesh,
+	Bb *pBb
 ) {
-	*pMesh = (GpuMesh){.triCount = triCount};
+	I32 vertCount = posArrSize / sizeof(GLfloat) / vecSize;
+	PIX_ERR_ASSERT("", triCount > 0 && vertCount > 0);
+	Bb bb = {0};
+	bbInit(&bb);
+	for (I32 i = 0; i < vertCount; ++i) {
+		const PixtyV3_F32 *pPos = (void *)&pPosArr[i * vecSize];
+		bbContrib(&bb, pPos, vecSize);
+		if (pBb) {
+			bbContrib(pBb, pPos, vecSize);
+		}
+	}
+	*pMesh = (GpuMesh){.triCount = triCount, .vecSize = vecSize};
+	bbGetCentreAndSize(&bb, vecSize, &pMesh->centre, &pMesh->size);
+
 	glGenVertexArrays(1, &pMesh->vao);
 	glBindVertexArray(pMesh->vao);
 	glGenBuffers(1, &pMesh->ebo);
@@ -279,7 +370,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 			mat4 ortho;\
 			vec2 offset;\
 			vec2 size;\
-			vec3 colour;\
+			vec4 colour;\
 			float sort;\
 			float intervals;\
 			float camDist;\
@@ -300,7 +391,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 			mat4 ortho;\
 			vec2 offset;\
 			vec2 size;\
-			vec3 colour;\
+			vec4 colour;\
 			float sort;\
 			float intervals;\
 			float camDist;\
@@ -313,7 +404,7 @@ PixErr timelineInit(Timeline *pTimeline) {
 					 discard;\
 				}\
 			}\
-			fragColor = colour;\
+			fragColor = colour.xyz;\
 		}\
 	";
 	err = gpuProgInit(vertShaderSrc, fragShaderSrc, &pTimeline->prog);
@@ -337,7 +428,8 @@ PixErr timelineInit(Timeline *pTimeline) {
 		sizeof(cornerArr),
 		cornerArr,
 		2,
-		&pTimeline->geo
+		&pTimeline->geo,
+		NULL
 	);
 	gpuUboInit(
 		pTimeline->prog,
@@ -354,7 +446,7 @@ PixErr viewportInit(Viewport *pViewport) {
 	PixErr err = PIX_ERR_SUCCESS;
 	GLint glErr = false;
 
-	pViewport->view = (View){.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 6.0f};
+	pViewport->view = (View){.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 3.0f};
 
 	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
@@ -362,6 +454,7 @@ PixErr viewportInit(Viewport *pViewport) {
 		layout (std140) uniform viewportDrawArgs {\
 			mat4 persp;\
 			mat4 view;\
+			vec4 offset;\
 			vec2 pan;\
 			float yaw;\
 			float pitch;\
@@ -385,7 +478,7 @@ PixErr viewportInit(Viewport *pViewport) {
 				.0f, .0f, .0f, 1.0f\
 			);\
 			mat4 rot = pitchMat * yawMat;\
-			vec4 pos = rot * vec4(vertPos, 1.0f);\
+			vec4 pos = rot * vec4(vertPos - offset.xyz, 1.0f);\
 			pos.xyz += vec3(.0f, .0f, -1.0f) * camDist;\
 			pos.xy += pan;\
 			gl_Position = persp * pos;\
@@ -427,7 +520,8 @@ PixErr viewportInit(Viewport *pViewport) {
 		sizeof(cornerArr),
 		cornerArr,
 		12,
-		&pViewport->geo
+		&pViewport->geo,
+		NULL
 	);
 	gpuUboInit(
 		pViewport->prog,
@@ -626,7 +720,21 @@ bool stageMeshIsValid(const Session *pSession) {
 }
 
 static
-void drawViewport(const Session *pSession, const Viewport *pViewport) {
+void drawViewport(const Session *pSession, Viewport *pViewport) {
+	//TODO wrap viewport->geo in mesh arr and remove cast to non-const
+	GpuMeshArr fallback = {.pArr = {(GpuMesh *)&pViewport->geo}, .count = 1};
+	const GpuMeshArr *pMeshArr = &fallback;
+	F32 meshSize = 1.0f;
+	PixtyV3_F32 offset = {0};
+	if (stageMeshIsValid(pSession)) {
+		I32 stageIdx = pSession->stageMeshArr.pTable[pSession->activeStage].idx;
+		const StageMesh *pStageMesh = pSession->stageMeshArr.pArr + stageIdx;
+		pMeshArr = &pStageMesh->instMeshArr;
+		meshSize = pStageMesh->size;
+		offset = pStageMesh->centre;
+	}
+	viewResetIfPending(&pViewport->view, false, meshSize * 3.0f, offset);
+
 	F32 aspect =
 		(F32)pViewport->frame.frameSize.d[0] /
 		(F32)pViewport->frame.frameSize.d[1];
@@ -640,19 +748,12 @@ void drawViewport(const Session *pSession, const Viewport *pViewport) {
 			.0f, .0f, 1.0f, 0.0f,
 			.0f, .0f, 0.0f, 1.0f
 		},
+		.offset = pViewport->view.offset,
 		.pan = pViewport->view.pan,
 		.yaw = pViewport->view.yaw,
 		.pitch = pViewport->view.pitch,
 		.camDist = pViewport->view.camDist
 	};
-	//TODO wrap viewport->geo in mesh arr and remove cast to non-const
-	GpuMeshArr fallback = {.pArr = {(GpuMesh *)&pViewport->geo}, .count = 1};
-	const GpuMeshArr *pMeshArr = &fallback;
-	if (stageMeshIsValid(pSession)) {
-		I32 stageIdx = pSession->stageMeshArr.pTable[pSession->activeStage].idx;
-		const StageMesh *pStageMesh = pSession->stageMeshArr.pArr + stageIdx;
-		pMeshArr = &pStageMesh->instMeshArr;
-	}
 	
 	gpuFrameClear(&pViewport->frame, (PixtyV3_F32){.1f, .1f, .1f});
 	glUseProgram(pViewport->prog);
@@ -681,10 +782,12 @@ FTimeframe fTimeFromCarkTimeframe(CarkTimeframe timeframe) {
 }
 
 static
-void drawTimeline(const Session *pSession, const Timeline *pTimeline) {
+void drawTimeline(const Session *pSession, Timeline *pTimeline) {
 	if (!pSession->info.pStageArr) {
 		return;
 	}
+	viewResetIfPending(&pTimeline->view, true, 1.0f, (PixtyV3_F32){0});
+
 	F32 aspect =
 		(F32)pTimeline->frame.frameSize.d[0] /
 		(F32)pTimeline->frame.frameSize.d[1];
@@ -719,7 +822,7 @@ void drawTimeline(const Session *pSession, const Timeline *pTimeline) {
 		glDrawElements(GL_TRIANGLES, 2 * 3, GL_UNSIGNED_INT, NULL);
 
 		drawArgs.ortho = orthoMatZoom;
-		drawArgs.colour = (PixtyV3_F32){.1f, .1f, .1f};
+		drawArgs.colour = (PixtyV4_F32){.1f, .1f, .1f, 1.0f};
 		drawArgs.sort = .75f;
 		drawArgs.offset.d[0] += pTimeline->view.yaw;
 		gpuUboBind(&pTimeline->ubo, &drawArgs);
@@ -734,7 +837,7 @@ void drawTimeline(const Session *pSession, const Timeline *pTimeline) {
 		if (drawArgs.size.d[0] < pixelSizeX * 10.0f) {
 			drawArgs.size.d[0] = pixelSizeX * 10.0f;
 		}
-		drawArgs.colour = (PixtyV3_F32){1.0f, .0f, .0f};
+		drawArgs.colour = (PixtyV4_F32){1.0f, .0f, .0f, 1.0f};
 		drawArgs.sort = 8.0f;
 		gpuUboBind(&pTimeline->ubo, &drawArgs);
 		glDrawElements(GL_TRIANGLES, 2 * 3, GL_UNSIGNED_INT, NULL);
@@ -824,6 +927,9 @@ void eventHandleForView(
 				case SDLK_RSHIFT:
 					pKeys->pan = pKeys->pan || !pKeys->orbit;
 					break;
+				case SDLK_F:
+					keyPressDown(&pView->reset);
+					break;
 				default:
 					;
 			}
@@ -839,6 +945,9 @@ void eventHandleForView(
 				//v fallthrough v
 				case SDLK_RSHIFT:
 					pKeys->pan = pKeys->pan && pKeys->orbit;
+					break;
+				case SDLK_F:
+					keyPressUp(&pView->reset);
 					break;
 				default:
 					;
@@ -1627,7 +1736,13 @@ void meshDestroy(Mesh *pMesh) {
 }
 
 static
-PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh, I32 stage, I32 inst) {
+PixErr meshLoadOnGpu(
+	Session *pSession,
+	const Mesh *pMesh,
+	I32 stage,
+	I32 inst,
+	Bb *pStageBb
+) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PIX_ERR_ASSERT("", pSession->stageMeshArr.pTable);
 	PixtyValidIdx *pIdx = pSession->stageMeshArr.pTable + stage;
@@ -1650,7 +1765,8 @@ PixErr meshLoadOnGpu(Session *pSession, const Mesh *pMesh, I32 stage, I32 inst) 
 		pMesh->corners.count * sizeof(I32),
 		pMesh->corners.pArr,
 		pMesh->corners.count / 3,
-		pStageMesh->instMeshArr.pArr + inst
+		pStageMesh->instMeshArr.pArr + inst,
+		pStageBb
 	);
 	return err;
 }
@@ -1719,6 +1835,8 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 		err = stageLogFromRef(pSession, faceRef.stageIdx, &pStageLog);
 		PIX_ERR_THROW_IFNOT(err, "", 0);
 		const CarkInStructLog *pFaceLog = pStageLog->structs.pArr + faceRef.structIdx;
+		Bb bb = {0};
+		bbInit(&bb);
 		for (I32 j = 0; j < pFaceLog->instArr.count; ++j) {
 			err = meshFromLog(pSession, pStage, j, contains, &cornerBuf, &posBuf, &mesh);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
@@ -1726,10 +1844,17 @@ PixErr openNewSession(CarkGuiState *pGui, Session *pSession) {
 				err = meshTriangulate(&mesh);
 				PIX_ERR_THROW_IFNOT(err, "", 0);
 			}
-			err = meshLoadOnGpu(pSession, &mesh, i, j);
+			err = meshLoadOnGpu(pSession, &mesh, i, j, &bb);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			meshClear(&mesh);
 		}
+		PixtyValidIdx stageMeshIdx = pSession->stageMeshArr.pTable[pStage->idx];
+		if (!stageMeshIdx.valid) {
+			continue;
+		}
+		StageMesh *pStageMesh = pSession->stageMeshArr.pArr + stageMeshIdx.idx;
+		I32 vecSize = pStageMesh->instMeshArr.pArr[0].vecSize;
+		bbGetCentreAndSize(&bb, vecSize, &pStageMesh->centre, &pStageMesh->size);
 	}
 	meshDestroy(&mesh);
 
