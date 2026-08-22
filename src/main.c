@@ -69,13 +69,22 @@ typedef struct KeyPress {
 	bool done : 1;
 } KeyPress;
 
+typedef struct Keys {
+	bool pan;
+	bool orbit;
+	bool scroll;
+} Keys;
+
 typedef struct View {
 	PixtyV4_F32 offset;
 	PixtyV2_F32 pan;
+	CarkGuiWindow window;
 	F32 yaw;
 	F32 pitch;
 	F32 camDist;
 	KeyPress reset;
+	Keys keys;
+	bool down;
 } View;
 
 typedef struct Viewport {
@@ -97,12 +106,6 @@ typedef struct Timeline {
 typedef struct GlCtx {
 	SDL_GLContext pSdlCtx;
 } GlCtx;
-
-typedef struct Keys {
-	bool pan;
-	bool orbit;
-	bool scroll;
-} Keys;
 
 static PixalcFPtrs alloc = {
 	.fpMalloc = malloc,
@@ -360,7 +363,10 @@ PixErr timelineInit(Timeline *pTimeline) {
 	PixErr err = PIX_ERR_SUCCESS;
 	GLint glErr = false;
 
-	pTimeline->view.camDist = 1.0f;
+	pTimeline->view = (View){
+		.window = CARK_GUI_WINDOW_TIMELINE,
+		.camDist = 1.0f
+	};
 
 	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
@@ -446,7 +452,12 @@ PixErr viewportInit(Viewport *pViewport) {
 	PixErr err = PIX_ERR_SUCCESS;
 	GLint glErr = false;
 
-	pViewport->view = (View){.yaw = PI * .25f, .pitch = PI * .125f, .camDist = 3.0f};
+	pViewport->view = (View){
+		.window = CARK_GUI_WINDOW_VIEWPORT,
+		.yaw = PI * .25f,
+		.pitch = PI * .125f,
+		.camDist = 3.0f
+	};
 
 	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
@@ -878,22 +889,23 @@ static
 void eventHandleForView(
 	PixtyV2_F32 fWindowSize,
 	SDL_Event *pEvent,
-	Keys *pKeys,
 	View *pView,
 	F32 sensitivity,
-	F32 zoomMin
+	F32 zoomMin,
+	CarkGuiWindow activeWindow
 ) {
+	bool isActive = pView->window == activeWindow;
 	switch (pEvent->type) {
 		case SDL_EVENT_MOUSE_MOTION:
-			if (pKeys->orbit) {
+			if (pView->keys.orbit) {
 				PixtyV2_F32 motion = {pEvent->motion.xrel, pEvent->motion.yrel};
 				_(&motion V2MULSEQL SENSITIVITY);
-				if (pKeys->pan) {
+				if (pView->keys.pan) {
 					motion = _(motion V2MULS .01f);
 					motion.d[1] *= -1.0f;
 					_(&pView->pan V2ADDEQL motion);
 				}
-				else if (pKeys->scroll) {
+				else if (pView->keys.scroll) {
 					pView->camDist += motion.d[1] * .05f;
 					pView->camDist = pView->camDist >= zoomMin ? pView->camDist : zoomMin;
 				}
@@ -906,26 +918,32 @@ void eventHandleForView(
 			}
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			pKeys->orbit = pEvent->button.button == SDL_BUTTON_MIDDLE;
+			if (!isActive) {
+				break;
+			}
+			pView->keys.orbit = pEvent->button.button == SDL_BUTTON_MIDDLE;
 			break;
 		case SDL_EVENT_MOUSE_BUTTON_UP:
 			if (pEvent->button.button == SDL_BUTTON_MIDDLE) {
-				pKeys->orbit = false;
-				pKeys->scroll = false;
-				pKeys->pan = false;
+				pView->keys.orbit = false;
+				pView->keys.scroll = false;
+				pView->keys.pan = false;
 			}
 			break;
 		case SDL_EVENT_KEY_DOWN:
+			if (!isActive) {
+				break;
+			}
 			switch (pEvent->key.key) {
 				case SDLK_LCTRL:
 				//v fallthrough v
 				case SDLK_RCTRL:
-					pKeys->scroll = pKeys->scroll || !pKeys->orbit;
+					pView->keys.scroll = pView->keys.scroll || !pView->keys.orbit;
 					break;
 				case SDLK_LSHIFT:
 				//v fallthrough v
 				case SDLK_RSHIFT:
-					pKeys->pan = pKeys->pan || !pKeys->orbit;
+					pView->keys.pan = pView->keys.pan || !pView->keys.orbit;
 					break;
 				case SDLK_F:
 					keyPressDown(&pView->reset);
@@ -939,12 +957,12 @@ void eventHandleForView(
 				case SDLK_LCTRL:
 				//v fallthrough v
 				case SDLK_RCTRL:
-					pKeys->scroll = pKeys->scroll && pKeys->orbit;
+					pView->keys.scroll = pView->keys.scroll && pView->keys.orbit;
 					break;
 				case SDLK_LSHIFT:
 				//v fallthrough v
 				case SDLK_RSHIFT:
-					pKeys->pan = pKeys->pan && pKeys->orbit;
+					pView->keys.pan = pView->keys.pan && pView->keys.orbit;
 					break;
 				case SDLK_F:
 					keyPressUp(&pView->reset);
@@ -954,12 +972,16 @@ void eventHandleForView(
 			}
 			break;
 		case SDL_EVENT_MOUSE_WHEEL:
+			if (!isActive && !pView->keys.orbit) {
+				break;
+			}
 			pView->camDist -= pEvent->wheel.y * SENSITIVITY;
 			pView->camDist = pView->camDist >= zoomMin ? pView->camDist : zoomMin;
 			break;
 		default:
 			;
 	}
+	pView->down = pView->keys.orbit || pView->reset.pressed;
 }
 
 static
@@ -969,8 +991,7 @@ PixErr eventHandle(
 	SDL_Event *pEvent,
 	bool *pExit,
 	Viewport *pViewport,
-	Timeline *pTimeline,
-	Keys *pKeys
+	Timeline *pTimeline
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PixtyV2_F32 fWindowSize = {(F32)windowSize.d[0], (F32)windowSize.d[1]};
@@ -983,16 +1004,22 @@ PixErr eventHandle(
 		default:
 			;
 	}
-	switch (activeWindow) {
-		case CARK_GUI_WINDOW_VIEWPORT:
-			eventHandleForView(fWindowSize, pEvent, pKeys, &pViewport->view, 1.0f, .0f);
-			break;
-		case CARK_GUI_WINDOW_TIMELINE:
-			eventHandleForView(fWindowSize, pEvent, pKeys, &pTimeline->view, .5f, .00001f);
-			break;
-		default:
-			;
-	}
+	eventHandleForView(
+		fWindowSize,
+		pEvent,
+		&pViewport->view,
+		1.0f,
+		.0f,
+		activeWindow
+	);
+	eventHandleForView(
+		fWindowSize,
+		pEvent,
+		&pTimeline->view,
+		.5f,
+		.00001f,
+		activeWindow
+	);
 	err = carkGuiEvent(pEvent);
 	PIX_ERR_RETURN_IFNOT(err, "");
 	return err;
@@ -1955,7 +1982,6 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 	Timeline timeline = {0};
 	timelineInit(&timeline);
 	CarkGuiState gui = {0};
-	Keys keys = {0};
 	sessionClear(&session);
 	err = iconsLoad(&gui);
 	PIX_ERR_THROW_IFNOT(err, "", 0);
@@ -1987,8 +2013,7 @@ PixErr mainLoop(SDL_Window *pWindow, GlCtx *pGlCtx) {
 				&event,
 				&exit,
 				&viewport,
-				&timeline,
-				&keys
+				&timeline
 			);
 			PIX_ERR_THROW_IFNOT(err, "", 0);
 			if (exit) {
