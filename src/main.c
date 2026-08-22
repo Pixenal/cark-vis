@@ -15,6 +15,7 @@
 #define CARK_PATH_LEN_MAX 4096
 #define PI 3.1415926536f
 #define VERT_POS_LOCATION 0
+#define VERT_IDX_LOCATION 1
 #define BIN_PATH_LEN_MAX 16384
 #define SENSITIVITY .5f
 
@@ -137,10 +138,21 @@ typedef struct FaceRange {
 	I32 size;
 } FaceRange;
 
+typedef struct Vert {
+	PixtyV3_F32 pos;
+	I32 itemIdx;
+} Vert;
+
+typedef struct VertArr {
+	Vert *pArr;
+	I32 size;
+	I32 count;
+} VertArr;
+
 typedef struct Mesh {
 	PixtyI32Arr faces;
 	PixtyI32Arr corners;
-	V3_F32Arr pos;
+	VertArr verts;
 	bool tris;
 } Mesh;
 
@@ -211,6 +223,7 @@ typedef struct ViewportDrawArgs {
 	F32 yaw;
 	F32 pitch;
 	F32 camDist;
+	I32 selectItem;
 } ViewportDrawArgs;
 
 typedef struct TimelineDrawArgs {
@@ -323,40 +336,40 @@ void bbGetCentreAndSize(const Bb *pBb, I32 vecSize, PixtyV3_F32 *pCentre, F32 *p
 
 static
 void gpuMeshInit(
-	I32 vecSize,
-	I32 posArrSize,
-	const GLfloat *pPosArr,
-	I32 cornerArrSize,
-	const GLuint *pCornerArr,
+	I32 vertCount,
+	const Vert *pVertArr,
 	I32 triCount,
+	const GLuint *pCornerArr,
 	GpuMesh *pMesh,
 	Bb *pBb
 ) {
-	I32 vertCount = posArrSize / sizeof(GLfloat) / vecSize;
 	PIX_ERR_ASSERT("", triCount > 0 && vertCount > 0);
 	Bb bb = {0};
 	bbInit(&bb);
 	for (I32 i = 0; i < vertCount; ++i) {
-		const PixtyV3_F32 *pPos = (void *)&pPosArr[i * vecSize];
-		bbContrib(&bb, pPos, vecSize);
+		const Vert *pVert = pVertArr + i;
+		bbContrib(&bb, &pVert->pos, 3);
 		if (pBb) {
-			bbContrib(pBb, pPos, vecSize);
+			bbContrib(pBb, &pVert->pos, 3);
 		}
 	}
-	*pMesh = (GpuMesh){.triCount = triCount, .vecSize = vecSize};
-	bbGetCentreAndSize(&bb, vecSize, &pMesh->centre, &pMesh->size);
+	*pMesh = (GpuMesh){.triCount = triCount, .vecSize = 3};
+	bbGetCentreAndSize(&bb, 3, &pMesh->centre, &pMesh->size);
 
 	glGenVertexArrays(1, &pMesh->vao);
 	glBindVertexArray(pMesh->vao);
 	glGenBuffers(1, &pMesh->ebo);
 	glGenBuffers(1, &pMesh->vbo);
 	glBindBuffer(GL_ARRAY_BUFFER, pMesh->vbo);
-	glBufferData(GL_ARRAY_BUFFER, posArrSize, pPosArr, GL_STATIC_DRAW);
+	glBufferData(GL_ARRAY_BUFFER, vertCount * sizeof(Vert), pVertArr, GL_STATIC_DRAW);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pMesh->ebo);
+	I32 cornerArrSize = triCount * 3 * sizeof(I32);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, cornerArrSize, pCornerArr, GL_STATIC_DRAW);
-	I32 vecByteSize = vecSize * sizeof(GL_FLOAT);
-	glVertexAttribPointer(VERT_POS_LOCATION, vecSize, GL_FLOAT, false, vecByteSize, NULL);
+	I32 vecByteSize = 3 * sizeof(F32);
+	glVertexAttribPointer(VERT_POS_LOCATION, 3, GL_FLOAT, false, sizeof(Vert), NULL);
+	glVertexAttribIPointer(VERT_IDX_LOCATION, 1, GL_INT, sizeof(Vert), (void *)(sizeof(PixtyV3_F32)));
 	glEnableVertexAttribArray(VERT_POS_LOCATION);
+	glEnableVertexAttribArray(VERT_IDX_LOCATION);
 }
 
 static
@@ -430,21 +443,24 @@ PixErr timelineInit(Timeline *pTimeline) {
 		1.0f, 1.0f,
 		.0f, 1.0f,
 	};
-
 	GLuint cornerArr[] = {
 		0, 1, 2,
 		2, 3, 0
 	};
-	gpuMeshInit(
-		2,
-		sizeof(posArr),
-		posArr,
-		sizeof(cornerArr),
-		cornerArr,
-		2,
-		&pTimeline->geo,
-		NULL
-	);
+
+	GpuMesh *pMesh = &pTimeline->geo;
+	glGenVertexArrays(1, &pMesh->vao);
+	glBindVertexArray(pMesh->vao);
+	glGenBuffers(1, &pMesh->ebo);
+	glGenBuffers(1, &pMesh->vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pMesh->vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(posArr), posArr, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pMesh->ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(cornerArr), cornerArr, GL_STATIC_DRAW);
+	I32 vecByteSize = 2 * sizeof(GL_FLOAT);
+	glVertexAttribPointer(VERT_POS_LOCATION, 2, GL_FLOAT, false, vecByteSize, NULL);
+	glEnableVertexAttribArray(VERT_POS_LOCATION);
+
 	gpuUboInit(
 		pTimeline->prog,
 		"timelineDrawArgs",
@@ -470,6 +486,8 @@ PixErr viewportInit(Viewport *pViewport) {
 	const GLchar vertShaderSrc[] = "\
 		#version 410 core\n\
 		layout (location = 0) in vec3 vertPos;\
+		layout (location = 1) in int itemIdx;\
+		out float selected;\
 		layout (std140) uniform viewportDrawArgs {\
 			mat4 persp;\
 			mat4 view;\
@@ -478,6 +496,7 @@ PixErr viewportInit(Viewport *pViewport) {
 			float yaw;\
 			float pitch;\
 			float camDist;\
+			int selectItem;\
 		};\
 		void main() {\
 			float sinYaw = sin(yaw);\
@@ -500,29 +519,31 @@ PixErr viewportInit(Viewport *pViewport) {
 			vec4 pos = rot * vec4(vertPos - offset.xyz, 1.0f);\
 			pos.xyz += vec3(.0f, .0f, -1.0f) * camDist;\
 			pos.xy += pan;\
+			selected = itemIdx == selectItem ? 1.0f : .0f;\
 			gl_Position = persp * pos;\
 		}\
 	";
 	const GLchar fragShaderSrc[] = "\
 		#version 410 core\n\
 		layout(location = 0) out vec3 fragColor;\
+		in float selected;\
 		void main() {\
-			fragColor = vec3(1.0, .0, .0);\
+			fragColor = mix(vec3(.5f, .5f, .5f), vec3(1.0f, .5f, .0f), selected);\
 		}\
 	";
 	err = gpuProgInit(vertShaderSrc, fragShaderSrc, &pViewport->prog);
 	PIX_ERR_RETURN_IFNOT(err, "");
 
 	//default cube
-	GLfloat posArr[] = {
-		-.5f, -.5f, -.5f,
-		.5f, -.5f, -.5f,
-		.5f, -.5f, .5f,
-		-.5f, -.5f, .5f,
-		-.5f, .5f, -.5f,
-		.5f, .5f, -.5f,
-		.5f, .5f, .5f, 
-		-.5f, .5f, .5f
+	Vert posArr[] = {
+		{.pos = {-.5f, -.5f, -.5f}, .itemIdx = {0}},
+		{.pos = {.5f, -.5f, -.5f}, .itemIdx = {1}},
+		{.pos = {.5f, -.5f, .5f}, .itemIdx = {2}},
+		{.pos = {-.5f, -.5f, .5f}, .itemIdx = {3}},
+		{.pos = {-.5f, .5f, -.5f}, .itemIdx = {4}},
+		{.pos = {.5f, .5f, -.5f}, .itemIdx = {5}},
+		{.pos = {.5f, .5f, .5f}, .itemIdx = {6}},
+		{.pos = {-.5f, .5f, .5f}, .itemIdx = {7}}
 	};
 	GLuint cornerArr[] = {
 		0, 1, 2, 2, 3, 0,
@@ -533,12 +554,10 @@ PixErr viewportInit(Viewport *pViewport) {
 		4, 5, 6, 6, 7, 2
 	};
 	gpuMeshInit(
-		3,
-		sizeof(posArr),
+		8,
 		posArr,
-		sizeof(cornerArr),
-		cornerArr,
 		12,
+		cornerArr,
 		&pViewport->geo,
 		NULL
 	);
@@ -771,7 +790,8 @@ void drawViewport(const Session *pSession, Viewport *pViewport) {
 		.pan = pViewport->view.pan,
 		.yaw = pViewport->view.yaw,
 		.pitch = pViewport->view.pitch,
-		.camDist = pViewport->view.camDist
+		.camDist = pViewport->view.camDist,
+		.selectItem = pSession->selectItem
 	};
 	
 	gpuFrameClear(&pViewport->frame, (PixtyV3_F32){.1f, .1f, .1f});
@@ -1096,6 +1116,7 @@ void sessionClear(Session *pSession) {
 	carkInFileDestroy(&alloc, &pSession->file);
 	pSession->info = (CarkInFileInfo){0};
 	pSession->activeStage = -1;
+	pSession->selectItem = -1;
 }
 
 static
@@ -1568,8 +1589,11 @@ void meshAddFace(
 			vertIdx = (I32)pVertEntry->idx;
 		}
 		else {
-			PIXALC_DYN_ARR_ADD(PixtyV3_F32, &alloc, &pMesh->pos, vertIdx);
-			pMesh->pos.pArr[vertIdx] = pPosBuf->pArr[posBufIdx];
+			PIXALC_DYN_ARR_ADD(Vert, &alloc, &pMesh->verts, vertIdx);
+			pMesh->verts.pArr[vertIdx] = (Vert){
+				.pos = pPosBuf->pArr[posBufIdx],
+				.itemIdx = pVertEntry->key.logIdx
+			};
 			++posBufIdx;
 			pVertEntry->idx = (U32)vertIdx;
 			pVertEntry->added = true;
@@ -1689,8 +1713,8 @@ PixtyV3_F32 meshPosGet(const void *pMeshRaw, PixmshFaceRange face, int32_t corne
 	I32 cornerAbs = face.start + corner;
 	PIX_ERR_ASSERT("", cornerAbs >= 0 && cornerAbs < pMesh->corners.count);
 	I32 vertIdx = pMesh->corners.pArr[cornerAbs];
-	PIX_ERR_ASSERT("", vertIdx >= 0 && vertIdx < pMesh->pos.count);
-	return pMesh->pos.pArr[vertIdx];
+	PIX_ERR_ASSERT("", vertIdx >= 0 && vertIdx < pMesh->verts.count);
+	return pMesh->verts.pArr[vertIdx].pos;
 }
 
 static
@@ -1698,7 +1722,7 @@ PixErr meshTriangulate(Mesh *pMesh) {
 	PixErr err = PIX_ERR_SUCCESS;
 	PixtyI32Arr tris = {0};
 	PixtyU8Arr idxBuf = {0};
-	PIX_ERR_ASSERT("", pMesh->faces.pArr && pMesh->corners.pArr && pMesh->pos.pArr);
+	PIX_ERR_ASSERT("", pMesh->faces.pArr && pMesh->corners.pArr && pMesh->verts.pArr);
 	for (I32 i = 0; i < pMesh->faces.count; ++i) {
 		FaceRange face = {.start = pMesh->faces.pArr[i]};
 		face.size = pMesh->faces.pArr[i + 1] - face.start;
@@ -1751,7 +1775,7 @@ static
 void meshClear(Mesh *pMesh) {
 	pMesh->faces.count = 0;
 	pMesh->corners.count = 0;
-	pMesh->pos.count = 0;
+	pMesh->verts.count = 0;
 	pMesh->tris = false;
 }
 
@@ -1763,8 +1787,8 @@ void meshDestroy(Mesh *pMesh) {
 	if (pMesh->corners.pArr) {
 		free(pMesh->corners.pArr);
 	}
-	if (pMesh->pos.pArr) {
-		free(pMesh->pos.pArr);
+	if (pMesh->verts.pArr) {
+		free(pMesh->verts.pArr);
 	}
 	*pMesh = (Mesh){0};
 }
@@ -1793,12 +1817,10 @@ PixErr meshLoadOnGpu(
 		return err;
 	}
 	gpuMeshInit(
-		3,
-		pMesh->pos.count * sizeof(PixtyV3_F32),
-		(GLfloat *)pMesh->pos.pArr,
-		pMesh->corners.count * sizeof(I32),
-		pMesh->corners.pArr,
+		pMesh->verts.count,
+		pMesh->verts.pArr,
 		pMesh->corners.count / 3,
+		pMesh->corners.pArr,
 		pStageMesh->instMeshArr.pArr + inst,
 		pStageBb
 	);

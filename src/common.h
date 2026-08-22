@@ -78,6 +78,7 @@ typedef struct Session {
 	I32 activeStage;
 	I32 activeStruct;
 	I32 activeInst;
+	I32 selectItem;
 } Session;
 
 #ifdef __cplusplus

@@ -393,6 +393,7 @@ typedef struct CarkInLogItem {
 	const U8 *pData;
 	CARK_TIMESTAMP_TYPE timestamp;
 	I32 idxInRange;
+	I32 loggedIdx;
 } CarkInLogItem;
 
 PixErr carkInInit(const PixalcFPtrs *pAlloc, const PixioFPtrs *pIo, CarkInCtx *pCtx);

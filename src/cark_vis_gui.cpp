@@ -84,12 +84,22 @@ static
 PixErr logRow(
 	const CarkStruct *pStructInfo,
 	CarkInLogItem item,
-	I32 itemIdx
+	I32 itemIdx,
+	I32 *pSelectItem
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
-	ImGui::TableNextRow();
+	ImGui::TableNextRow(ImGuiTableRowFlags_None, 23.0f);
+	ImGui::PushID(item.loggedIdx);
 	if (ImGui::TableSetColumnIndex(0)) {
-		ImGui::Text("%p", item.timestamp);
+
+		ImGuiSelectableFlags selectableFlags =
+			ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
+		char timestampStr[17];
+		snprintf(timestampStr, sizeof(timestampStr), "%p", (void *)item.timestamp);
+		if (ImGui::Selectable(timestampStr, itemIdx == *pSelectItem, selectableFlags)) {
+			printf("selected\n");
+			*pSelectItem = itemIdx;
+		}
 	}
 	if (ImGui::TableSetColumnIndex(1)) {
 		ImGui::Text("%d", itemIdx);
@@ -144,6 +154,7 @@ PixErr logRow(
 				PIX_ERR_ASSERT("invalid component type", false);
 		}
 	}
+	ImGui::PopID();
 	return err;
 }
 
@@ -152,7 +163,8 @@ PixErr logTable(
 	const CarkStage *pStageInfo,
 	const CarkInStageLog *pStageLog,
 	CarkInRef ref,
-	const CarkStruct *pStructInfo
+	const CarkStruct *pStructInfo,
+	I32 *pSelectItem
 ) {
 	PixErr err = PIX_ERR_SUCCESS;
 	ImGuiTableColumnFlags columnFlags = ImGuiTableColumnFlags_None;
@@ -175,7 +187,7 @@ PixErr logTable(
 		for (I32 i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
 			CarkInLogItem item = {0};
 			carkInLogIdx(pStageLog, pStageInfo, ref.ref.structIdx, ref.inst, i, &item);
-			err = logRow(pStructInfo, item, i);
+			err = logRow(pStructInfo, item, i, pSelectItem);
 			PIX_ERR_RETURN_IFNOT(err, "");
 		}
 	}
@@ -340,7 +352,7 @@ PixErr carkGuiLayout(
 				ImGuiTableFlags_NoHostExtendX;
 			I32 columnCount = 2 + pStructInfo->info.compCount;
 			if (ImGui::BeginTable("Comp Log", columnCount, tableFlags, ImVec2{.0f, .0f})) {
-				err = logTable(pStageInfo, pStageLog, ref, pStructInfo);
+				err = logTable(pStageInfo, pStageLog, ref, pStructInfo, &pSession->selectItem);
 				PIX_ERR_RETURN_IFNOT(err, "");
 				ImGui::EndTable();
 			}

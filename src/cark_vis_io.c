@@ -2014,7 +2014,8 @@ PixErr carkInLogIdx(
 	*pItem = (CarkInLogItem){
 		.timestamp = *(CARK_TIMESTAMP_TYPE *)pData,
 		.pData = pData + CARK_TIMESTAMP_SIZE,
-		.idxInRange = itemIdx - range.start
+		.idxInRange = itemIdx - range.start,
+		.loggedIdx = loggedIdx
 	};
 	return err;
 }
